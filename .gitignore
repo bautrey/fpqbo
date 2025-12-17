@@ -14,3 +14,15 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Claude
+.claude/
+
+# Backup files
+*.bak
+
+# Separate git repos (submodules or standalone)
+oauth-service/
+
+# Nested virtual environments
+yir2025/venv/

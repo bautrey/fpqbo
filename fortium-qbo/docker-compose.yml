@@ -1,0 +1,31 @@
+# Fortium QBO - Development Environment
+name: fortium-qbo
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fortium-qbo-api
+    ports:
+      - "8085:8000"
+    environment:
+      - APP_SECRET_KEY=${APP_SECRET_KEY}
+      - SESSION_MAX_AGE_DAYS=${SESSION_MAX_AGE_DAYS:-30}
+      - DEBUG=${DEBUG:-true}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_ALLOWED_DOMAIN=${GOOGLE_ALLOWED_DOMAIN:-fortiumpartners.com}
+      - DATABASE_URL=sqlite:///./data/fortium-qbo.db
+      - BASE_URL=http://localhost:8085
+    volumes:
+      - .:/app:delegated
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: "no"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
