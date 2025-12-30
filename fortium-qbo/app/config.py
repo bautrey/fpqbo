@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # QBO OAuth (Optional - for Phase 3+)
     qbo_client_id: str | None = None
     qbo_client_secret: SecretStr | None = None
+    qbo_access_token: SecretStr | None = None
+    qbo_refresh_token: str | None = None
+    qbo_company_id: str | None = None
 
     # Database
     database_url: str = "sqlite:///./data/fortium-qbo.db"

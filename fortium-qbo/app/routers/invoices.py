@@ -1,0 +1,100 @@
+"""Invoice endpoints using QBO SDK."""
+
+from datetime import datetime
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.services.qbo_service import QBOService, get_qbo_service
+
+router = APIRouter(prefix="/invoices", tags=["invoices"])
+
+
+def _get_service(db: Session = Depends(get_db)) -> QBOService:
+    return get_qbo_service(db)
+
+
+@router.get("/", response_model=list[dict[str, Any]])
+async def list_invoices(
+    company_id: int = Query(..., description="QBO company ID"),
+    start_date: datetime | None = Query(None, description="Filter from date"),
+    end_date: datetime | None = Query(None, description="Filter to date"),
+    max_results: int = Query(1000, le=1000, description="Max results"),
+    qbo: QBOService = Depends(_get_service),
+) -> list[dict[str, Any]]:
+    """List invoices, optionally filtered by date range."""
+    try:
+        return await qbo.get_invoices(
+            company_id=company_id,
+            start_date=start_date,
+            end_date=end_date,
+            max_results=max_results,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.get("/{invoice_id}", response_model=dict[str, Any])
+async def get_invoice(
+    invoice_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Get a specific invoice by ID."""
+    try:
+        invoice = await qbo.get_invoice_by_id(company_id, invoice_id)
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        return invoice
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.get("/trailing-12m/summary")
+async def get_trailing_12m_summary(
+    company_id: int = Query(..., description="QBO company ID"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Get trailing 12 months invoice summary with monthly totals."""
+    try:
+        end_date = datetime.utcnow()
+        start_date = datetime(end_date.year - 1, end_date.month, 1)
+
+        invoices = await qbo.get_invoices(
+            company_id=company_id,
+            start_date=start_date,
+            end_date=end_date,
+            max_results=1000,
+        )
+
+        # Aggregate by month
+        monthly_totals: dict[str, dict[str, Any]] = {}
+        for inv in invoices:
+            txn_date = inv.get("TxnDate", "")
+            if txn_date:
+                month_key = txn_date[:7]  # YYYY-MM
+                if month_key not in monthly_totals:
+                    monthly_totals[month_key] = {"total": 0.0, "count": 0}
+                monthly_totals[month_key]["total"] += float(inv.get("TotalAmt", 0))
+                monthly_totals[month_key]["count"] += 1
+
+        return {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "monthly_totals": dict(sorted(monthly_totals.items())),
+            "grand_total": sum(m["total"] for m in monthly_totals.values()),
+            "total_invoices": sum(m["count"] for m in monthly_totals.values()),
+            "fetched_at": datetime.utcnow().isoformat(),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")

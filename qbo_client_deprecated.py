@@ -1,9 +1,30 @@
 """
+DEPRECATED: This file has been replaced by fortium-qbo/app/services/qbo_service.py
+
+The new QBOService class uses the python-quickbooks SDK and provides:
+- Full entity support (Invoice, Customer, Vendor, Account, Bill, Payment)
+- Auto token refresh with database persistence
+- Async support for FastAPI
+- Reports via direct API (Trial Balance, Balance Sheet, P&L)
+
+Use the FastAPI endpoints instead:
+- /api/invoices, /api/accounts, /api/customers, /api/vendors
+- /api/bills, /api/payments, /api/reports
+
+---
+ORIGINAL DOCSTRING:
 QuickBooks Online API Client
 
 Provides direct access to QBO API using OAuth2 tokens.
 Can import tokens from n8n credentials or use standalone.
 """
+
+import warnings
+warnings.warn(
+    "qbo_client_deprecated.py is deprecated. Use fortium-qbo/app/services/qbo_service.py",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import os
 import json

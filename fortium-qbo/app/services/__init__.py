@@ -1,12 +1,5 @@
-"""Business logic services for fortium-qbo.
+"""Business logic services for fortium-qbo."""
 
-Phase 3+:
-- qbo_client.py - QBO API client wrapper
-- token_manager.py - Token refresh service
+from app.services.qbo_service import QBOService, get_qbo_service
 
-Phase 4+:
-- api_key_service.py - API key generation and validation
-
-Phase 5+:
-- qbo_proxy.py - QBO request proxying
-"""
+__all__ = ["QBOService", "get_qbo_service"]

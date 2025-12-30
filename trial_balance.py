@@ -3,11 +3,16 @@ Trial Balance Parser
 
 Fetches and parses QuickBooks Online Trial Balance report.
 Extracts account balances with proper handling of parent/child accounts.
+
+NOTE: This utility uses the deprecated qbo_client. For production use,
+prefer the FastAPI endpoint: GET /api/reports/trial-balance
 """
 
 import json
 import re
-from qbo_client import QBOClient
+
+# Import from deprecated client (will emit DeprecationWarning)
+from qbo_client_deprecated import QBOClient
 
 
 def parse_currency(val):
