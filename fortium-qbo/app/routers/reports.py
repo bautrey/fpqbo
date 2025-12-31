@@ -7,9 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.dependencies import verify_api_key
 from app.services.qbo_service import QBOService, get_qbo_service
 
-router = APIRouter(prefix="/reports", tags=["reports"])
+router = APIRouter(
+    prefix="/reports",
+    tags=["reports"],
+    dependencies=[Depends(verify_api_key)],
+)
 
 
 def _get_service(db: Session = Depends(get_db)) -> QBOService:

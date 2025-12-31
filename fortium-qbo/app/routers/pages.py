@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import AdminUser
+from app.models import AdminUser, ApiKey
 from app.models.qbo_company import QboCompany
 from app.services.session_service import verify_session
 from app.utils.token_status import get_token_status
@@ -145,6 +145,68 @@ async def companies_page(request: Request, message: str | None = None):
                 "companies": companies,
                 "message": message,
                 "qbo_configured": settings.qbo_configured,
+            }
+        )
+
+    finally:
+        db.close()
+
+
+@router.get("/admin/api-keys")
+async def api_keys_page(request: Request, message: str | None = None):
+    """
+    Render API keys management page.
+
+    Requires authenticated admin session.
+    Shows list of API keys with status and actions.
+
+    Query params:
+        message: Flash message type ("created", "revoked", "reactivated")
+
+    Returns:
+        HTML API keys page if authenticated
+        Redirect to /login if not authenticated
+    """
+    # Check for session cookie
+    session_token = request.cookies.get("auth_session")
+
+    if not session_token:
+        logger.info("No session cookie, redirecting to login")
+        return RedirectResponse(url="/login", status_code=302)
+
+    # Verify session
+    email = verify_session(session_token)
+
+    if not email:
+        logger.info("Invalid session token, redirecting to login")
+        return RedirectResponse(url="/login", status_code=302)
+
+    # Get user, companies, and API keys from database
+    db = SessionLocal()
+    try:
+        admin_user = db.execute(
+            select(AdminUser).where(AdminUser.email == email)
+        ).scalar_one_or_none()
+
+        if not admin_user:
+            logger.warning(f"Session valid but user not in database: {email}")
+            return RedirectResponse(url="/login", status_code=302)
+
+        # Fetch all companies (for the create modal)
+        companies = db.query(QboCompany).order_by(QboCompany.name).all()
+
+        # Fetch all API keys with their companies
+        api_keys = db.query(ApiKey).order_by(ApiKey.created_at.desc()).all()
+
+        # Render API keys page
+        return templates.TemplateResponse(
+            "admin/api_keys.html",
+            {
+                "request": request,
+                "user": admin_user,
+                "companies": companies,
+                "api_keys": api_keys,
+                "message": message,
             }
         )
 

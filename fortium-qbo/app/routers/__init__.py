@@ -2,6 +2,7 @@
 
 from app.routers import (
     accounts,
+    api_keys,
     auth,
     bills,
     customers,
@@ -15,6 +16,7 @@ from app.routers import (
 
 __all__ = [
     "accounts",
+    "api_keys",
     "auth",
     "bills",
     "customers",

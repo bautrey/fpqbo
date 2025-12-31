@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
-from app.routers import accounts, auth, bills, customers, invoices, pages, payments, qbo_oauth, reports, vendors
+from app.routers import accounts, api_keys, auth, bills, customers, invoices, pages, payments, qbo_oauth, reports, vendors
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Include auth and pages routers
 app.include_router(auth.router)
 app.include_router(pages.router)
+
+# API key management (admin-only)
+app.include_router(api_keys.router)
 
 # Register QBO entity routers
 app.include_router(invoices.router, prefix="/api")
