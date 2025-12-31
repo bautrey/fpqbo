@@ -32,6 +32,13 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+def init_db() -> None:
+    """Create all database tables."""
+    # Import models to ensure they're registered with Base
+    from app import models  # noqa: F401
+    Base.metadata.create_all(bind=engine)
+
+
 def get_db() -> Generator[Session, None, None]:
     """Dependency that provides a database session."""
     db = SessionLocal()

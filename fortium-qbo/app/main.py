@@ -20,6 +20,7 @@ async def lifespan(app: FastAPI):
 
     Startup:
     - Log application start
+    - Initialize database tables
     - Seed initial admin user if INITIAL_ADMIN_EMAIL is configured
 
     Shutdown:
@@ -29,6 +30,11 @@ async def lifespan(app: FastAPI):
     logger.info("fortium-qbo starting up...")
     logger.info(f"Debug mode: {settings.debug}")
     logger.info(f"Database: {settings.database_url}")
+
+    # Initialize database tables
+    from app.database import init_db
+    init_db()
+    logger.info("Database tables initialized")
 
     # Seed initial admin user
     if settings.initial_admin_email:
