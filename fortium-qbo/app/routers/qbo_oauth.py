@@ -182,6 +182,19 @@ async def _fetch_company_name(realm_id: str, access_token: str) -> str:
         return "Unknown Company"
 
 
+@router.get("/api/qbo/debug-config")
+async def debug_config():
+    """Debug endpoint to check QBO configuration (no secrets exposed)."""
+    return {
+        "qbo_configured": settings.qbo_configured,
+        "qbo_us_configured": settings.qbo_us_configured,
+        "qbo_ca_configured": settings.qbo_ca_configured,
+        "us_client_id_prefix": settings.qbo_client_id[:20] + "..." if settings.qbo_client_id else None,
+        "ca_client_id_prefix": settings.qbo_ca_client_id[:20] + "..." if settings.qbo_ca_client_id else None,
+        "callback_url": settings.qbo_callback_url,
+    }
+
+
 @router.get("/api/qbo/connect")
 async def qbo_connect(request: Request, region: str = "US"):
     """
