@@ -31,6 +31,9 @@ class QboCompany(Base):
         String(10), unique=True, nullable=False, index=True
     )
     realm_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    region: Mapped[str] = mapped_column(
+        String(2), nullable=False, default="US"
+    )  # "US" or "CA" - determines which OAuth credentials to use
 
     # OAuth tokens
     access_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

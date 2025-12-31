@@ -89,16 +89,21 @@ class QBOService:
 
     def _refresh_token(self, company: QboCompany) -> None:
         """Refresh OAuth token and persist to database."""
-        if not settings.qbo_client_id or not settings.qbo_client_secret:
-            raise ValueError("QBO client credentials not configured")
+        credentials = settings.get_qbo_credentials(company.region)
+        if not credentials:
+            raise ValueError(f"QBO credentials not configured for region: {company.region}")
+
+        client_id, client_secret = credentials
+        # Both US and Canada now use production environment
+        environment = "production"
 
         auth_client = AuthClient(
-            client_id=settings.qbo_client_id,
-            client_secret=settings.qbo_client_secret.get_secret_value(),
+            client_id=client_id,
+            client_secret=client_secret,
             access_token=company.access_token,
             refresh_token=company.refresh_token,
-            environment="production",
-            redirect_uri=f"{settings.base_url}/api/qbo/callback",
+            environment=environment,
+            redirect_uri=settings.qbo_callback_url,
         )
 
         # Refresh the token
@@ -123,16 +128,21 @@ class QBOService:
             if self._needs_refresh(company):
                 self._refresh_token(company)
 
-            if not settings.qbo_client_id or not settings.qbo_client_secret:
-                raise ValueError("QBO client credentials not configured")
+            credentials = settings.get_qbo_credentials(company.region)
+            if not credentials:
+                raise ValueError(f"QBO credentials not configured for region: {company.region}")
+
+            client_id, client_secret = credentials
+            # Both US and Canada now use production environment
+            environment = "production"
 
             auth_client = AuthClient(
-                client_id=settings.qbo_client_id,
-                client_secret=settings.qbo_client_secret.get_secret_value(),
+                client_id=client_id,
+                client_secret=client_secret,
                 access_token=company.access_token,
                 refresh_token=company.refresh_token,
-                environment="production",
-                redirect_uri=f"{settings.base_url}/api/qbo/callback",
+                environment=environment,
+                redirect_uri=settings.qbo_callback_url,
             )
 
             self._clients[cache_key] = QuickBooks(

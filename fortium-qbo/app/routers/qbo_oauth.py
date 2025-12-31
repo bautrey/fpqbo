@@ -59,16 +59,37 @@ def _require_auth(request: Request) -> str:
 
 
 def _get_intuit_auth_client(
+    region: str = "US",
     access_token: str | None = None,
     refresh_token: str | None = None,
-) -> AuthClient:
-    """Create Intuit AuthClient with configured credentials."""
+) -> AuthClient | None:
+    """
+    Create Intuit AuthClient with credentials for the specified region.
+
+    Args:
+        region: "US" or "CA"
+        access_token: Optional existing access token
+        refresh_token: Optional existing refresh token
+
+    Returns:
+        AuthClient configured for the region, or None if region not configured
+    """
+    credentials = settings.get_qbo_credentials(region)
+    if not credentials:
+        logger.error(f"QBO credentials not configured for region: {region}")
+        return None
+
+    client_id, client_secret = credentials
+
+    # Both US and Canada now use production environment
+    environment = "production"
+
     return AuthClient(
-        client_id=settings.qbo_client_id,
-        client_secret=settings.qbo_client_secret.get_secret_value(),
+        client_id=client_id,
+        client_secret=client_secret,
         access_token=access_token,
         refresh_token=refresh_token,
-        environment="production",
+        environment=environment,
         redirect_uri=settings.qbo_callback_url,
     )
 
@@ -162,14 +183,18 @@ async def _fetch_company_name(realm_id: str, access_token: str) -> str:
 
 
 @router.get("/api/qbo/connect")
-async def qbo_connect(request: Request):
+async def qbo_connect(request: Request, region: str = "US"):
     """
     Initiate QBO OAuth flow.
 
     1. Verify admin authentication
-    2. Generate state parameter for CSRF protection
-    3. Store state in session
-    4. Redirect to Intuit OAuth consent screen
+    2. Validate region parameter
+    3. Generate state parameter for CSRF protection
+    4. Store state and region in session
+    5. Redirect to Intuit OAuth consent screen
+
+    Args:
+        region: "US" or "CA" - determines which OAuth app to use
 
     Returns:
         302 Redirect to Intuit OAuth authorization URL
@@ -177,32 +202,44 @@ async def qbo_connect(request: Request):
     # Verify authentication
     try:
         email = _require_auth(request)
-        logger.info(f"QBO OAuth connect initiated by {email}")
+        logger.info(f"QBO OAuth connect initiated by {email} for region {region}")
     except RedirectResponse as redirect:
         return redirect
 
-    # Check QBO credentials configured
-    if not settings.qbo_configured:
-        logger.error("QBO OAuth not configured")
+    # Validate region
+    if region not in ("US", "CA"):
+        return _error_response(f"Invalid region: {region}. Must be 'US' or 'CA'.")
+
+    # Check QBO credentials configured for this region
+    if region == "US" and not settings.qbo_us_configured:
+        logger.error("QBO OAuth not configured for US")
         return _error_response(
-            "QBO OAuth not configured. Set QBO_CLIENT_ID and QBO_CLIENT_SECRET environment variables."
+            "QBO OAuth not configured for US. Set QBO_CLIENT_ID and QBO_CLIENT_SECRET environment variables."
+        )
+    elif region == "CA" and not settings.qbo_ca_configured:
+        logger.error("QBO OAuth not configured for Canada")
+        return _error_response(
+            "QBO OAuth not configured for Canada. Set QBO_CA_CLIENT_ID and QBO_CA_CLIENT_SECRET environment variables."
         )
 
     # Generate state for CSRF protection
     state = secrets.token_urlsafe(32)
 
-    # Store state in session (uses SessionMiddleware)
+    # Store state and region in session (uses SessionMiddleware)
     request.session["qbo_oauth_state"] = state
+    request.session["qbo_oauth_region"] = region
 
     # Build authorization URL
-    auth_client = _get_intuit_auth_client()
+    auth_client = _get_intuit_auth_client(region=region)
+    if not auth_client:
+        return _error_response(f"Failed to create auth client for region {region}")
 
     auth_url = auth_client.get_authorization_url(
         scopes=[Scopes.ACCOUNTING],
         state_token=state,
     )
 
-    logger.info(f"Redirecting to Intuit OAuth, state={state[:8]}...")
+    logger.info(f"Redirecting to Intuit OAuth ({region}), state={state[:8]}...")
 
     return RedirectResponse(url=auth_url, status_code=302)
 
@@ -255,12 +292,21 @@ async def qbo_callback(
         logger.error(f"State mismatch: stored={stored_state[:8] if stored_state else None}..., received={state[:8] if state else None}...")
         return _error_response("Invalid state parameter. Please try again.")
 
-    # Clear state from session
+    # Get region from session (stored during connect)
+    region = request.session.get("qbo_oauth_region", "US")
+
+    # Clear state and region from session
     del request.session["qbo_oauth_state"]
+    if "qbo_oauth_region" in request.session:
+        del request.session["qbo_oauth_region"]
 
     try:
-        # Exchange code for tokens
-        auth_client = _get_intuit_auth_client()
+        # Exchange code for tokens using region-specific credentials
+        auth_client = _get_intuit_auth_client(region=region)
+        if not auth_client:
+            logger.error(f"Failed to create auth client for region {region}")
+            return _error_response(f"OAuth not configured for region {region}")
+
         auth_client.get_bearer_token(code, realm_id=realmId)
 
         access_token = auth_client.access_token
@@ -296,12 +342,13 @@ async def qbo_callback(
                 db.commit()
                 logger.info(f"Updated existing QBO company: {existing.code}")
             else:
-                # Create new company
+                # Create new company with region
                 company_code = _generate_company_code(db, company_name)
                 new_company = QboCompany(
                     name=company_name,
                     code=company_code,
                     realm_id=realmId,
+                    region=region,
                     access_token=access_token,
                     refresh_token=refresh_token,
                     token_expires_at=datetime.utcnow() + timedelta(hours=1),
@@ -366,17 +413,18 @@ async def disconnect_company(request: Request, company_id: int):
         # Best-effort token revocation with Intuit (per OAuth 2.0 RFC 7009)
         if company.refresh_token or company.access_token:
             try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    token_to_revoke = company.refresh_token or company.access_token
-                    await client.post(
-                        "https://developer.api.intuit.com/v2/oauth2/tokens/revoke",
-                        data={"token": token_to_revoke},
-                        auth=(
-                            settings.qbo_client_id,
-                            settings.qbo_client_secret.get_secret_value(),
-                        ),
-                    )
-                logger.info(f"Revoked token with Intuit for company {company_code}")
+                # Use region-specific credentials for revocation
+                credentials = settings.get_qbo_credentials(company.region)
+                if credentials:
+                    client_id, client_secret = credentials
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        token_to_revoke = company.refresh_token or company.access_token
+                        await client.post(
+                            "https://developer.api.intuit.com/v2/oauth2/tokens/revoke",
+                            data={"token": token_to_revoke},
+                            auth=(client_id, client_secret),
+                        )
+                    logger.info(f"Revoked token with Intuit for company {company_code} (region={company.region})")
             except Exception as e:
                 logger.warning(f"Failed to revoke token with Intuit (best effort): {e}")
 
@@ -442,11 +490,18 @@ async def refresh_company_token(request: Request, company_id: int):
             }
 
         try:
-            # Refresh token using Intuit AuthClient
+            # Refresh token using Intuit AuthClient with region-specific credentials
             auth_client = _get_intuit_auth_client(
+                region=company.region,
                 access_token=company.access_token,
                 refresh_token=company.refresh_token,
             )
+            if not auth_client:
+                return {
+                    "success": False,
+                    "message": f"OAuth not configured for region {company.region}",
+                    "reconnect_required": True,
+                }
             auth_client.refresh()
 
             # Update company record

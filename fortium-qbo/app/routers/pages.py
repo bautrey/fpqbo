@@ -145,6 +145,8 @@ async def companies_page(request: Request, message: str | None = None):
                 "companies": companies,
                 "message": message,
                 "qbo_configured": settings.qbo_configured,
+                "qbo_us_configured": settings.qbo_us_configured,
+                "qbo_ca_configured": settings.qbo_ca_configured,
             }
         )
 

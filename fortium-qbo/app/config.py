@@ -26,10 +26,14 @@ class Settings(BaseSettings):
     google_allowed_domain: str = "fortiumpartners.com"
     initial_admin_email: str | None = None
 
-    # QBO OAuth (Optional - for Phase 3+)
+    # QBO OAuth - US (Production)
     qbo_client_id: str | None = None
     qbo_client_secret: SecretStr | None = None
-    qbo_redirect_uri: str | None = None  # Defaults to {base_url}/api/qbo/callback
+    qbo_redirect_uri: str | None = None  # Defaults to {base_url}/callback
+
+    # QBO OAuth - Canada (separate Intuit app required)
+    qbo_ca_client_id: str | None = None
+    qbo_ca_client_secret: SecretStr | None = None
 
     # DEPRECATED - tokens now stored in database (kept for migration)
     qbo_access_token: SecretStr | None = None
@@ -54,8 +58,34 @@ class Settings(BaseSettings):
 
     @property
     def qbo_configured(self) -> bool:
-        """Check if QBO OAuth is configured."""
+        """Check if any QBO OAuth is configured (US or CA)."""
+        return self.qbo_us_configured or self.qbo_ca_configured
+
+    @property
+    def qbo_us_configured(self) -> bool:
+        """Check if US QBO OAuth is configured."""
         return bool(self.qbo_client_id and self.qbo_client_secret)
+
+    @property
+    def qbo_ca_configured(self) -> bool:
+        """Check if Canada QBO OAuth is configured."""
+        return bool(self.qbo_ca_client_id and self.qbo_ca_client_secret)
+
+    def get_qbo_credentials(self, region: str) -> tuple[str, str] | None:
+        """
+        Get QBO OAuth credentials for a specific region.
+
+        Args:
+            region: "US" or "CA"
+
+        Returns:
+            Tuple of (client_id, client_secret) or None if not configured
+        """
+        if region == "US" and self.qbo_us_configured:
+            return (self.qbo_client_id, self.qbo_client_secret.get_secret_value())
+        elif region == "CA" and self.qbo_ca_configured:
+            return (self.qbo_ca_client_id, self.qbo_ca_client_secret.get_secret_value())
+        return None
 
     @field_validator("app_secret_key")
     @classmethod
