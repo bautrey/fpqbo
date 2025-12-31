@@ -97,6 +97,53 @@ VALUES ('newadmin@fortiumpartners.com', 0, datetime('now'));
 
 Admin management UI will be added in a future phase.
 
+## QuickBooks Connection Setup
+
+### Intuit Developer Portal Setup
+
+1. **Create Intuit Developer Account:**
+   - Visit [Intuit Developer Portal](https://developer.intuit.com/)
+   - Create account or sign in
+
+2. **Create OAuth App:**
+   - Go to Dashboard > Create an app
+   - Select "QuickBooks Online and Payments"
+   - App name: "fortium-qbo"
+
+3. **Configure OAuth Settings:**
+   - Redirect URIs: `{BASE_URL}/callback`
+     - Production: `https://qbo-oauth.onrender.com/callback` (already registered)
+     - Local dev: `http://localhost:8086/callback` (register if needed)
+   - Scopes: Select "Accounting"
+
+4. **Get Credentials:**
+   - Copy Client ID and Client Secret
+   - Add to .env file:
+     ```
+     QBO_CLIENT_ID=your-client-id
+     QBO_CLIENT_SECRET=your-client-secret
+     ```
+
+### Connecting QuickBooks
+
+1. Start the application: `docker compose up` or `uvicorn app.main:app --reload`
+2. Log in at `{BASE_URL}/login` (Google OAuth)
+3. Navigate to `/admin/companies`
+4. Click "Connect QuickBooks"
+5. Authorize access on Intuit consent screen
+6. Company appears in list with "Active" status
+
+### Token Management
+
+- **Automatic Refresh:** Tokens automatically refresh 5 minutes before expiration
+- **Manual Refresh:** Click "Refresh" button on companies page
+- **Disconnect:** Click "Disconnect" to revoke access (per OAuth 2.0 RFC 7009)
+- **Status Indicators:**
+  - Green "Active": Token valid for 30+ minutes
+  - Yellow "Expiring Soon": Token expires within 30 minutes
+  - Red "Expired": Token has expired (automatic refresh will attempt on next API call)
+  - Gray "Disconnected": No active connection
+
 ### Configuration
 
 Copy `.env.example` to `.env` and configure the following required settings:
@@ -208,12 +255,12 @@ Production deployment targets:
 
 ## Phase Roadmap
 
-- ✅ **Phase 1:** Core Infrastructure
-- ✅ **Phase 2:** Admin UI - Google OAuth authentication (this phase)
-- ⬜ **Phase 3:** QBO OAuth - Token management and refresh
-- ⬜ **Phase 4:** API Gateway - API key authentication
-- ⬜ **Phase 5:** QBO Proxy - Entity endpoints
-- ⬜ **Phase 6:** Deployment - Render production deployment
+- [x] **Phase 1:** Core Infrastructure
+- [x] **Phase 2:** Admin UI - Google OAuth authentication
+- [x] **Phase 3:** QBO OAuth - Token management and refresh
+- [ ] **Phase 4:** API Gateway - API key authentication
+- [ ] **Phase 5:** QBO Proxy - Entity endpoints
+- [ ] **Phase 6:** Deployment - Render production deployment
 
 ## Documentation
 

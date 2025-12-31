@@ -59,6 +59,28 @@ class QBOService:
             raise ValueError(f"QBO company not found for realm: {realm_id}")
         return company
 
+    def get_company_by_code(self, code: str) -> QboCompany:
+        """
+        Get QBO company by code.
+
+        Args:
+            code: Company code (e.g., "FOR-482")
+
+        Returns:
+            QboCompany instance
+
+        Raises:
+            ValueError: If company not found or disconnected
+        """
+        company = self.db.query(QboCompany).filter(QboCompany.code == code).first()
+        if not company:
+            raise ValueError(f"QBO company not found: {code}")
+        if company.token_status == "disconnected":
+            raise ValueError(
+                f"QBO company {code} is disconnected. Please reconnect via /admin/companies."
+            )
+        return company
+
     def _needs_refresh(self, company: QboCompany) -> bool:
         """Check if token needs refresh."""
         if not company.token_expires_at:

@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
-from app.routers import accounts, auth, bills, customers, invoices, pages, payments, reports, vendors
+from app.routers import accounts, auth, bills, customers, invoices, pages, payments, qbo_oauth, reports, vendors
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,9 @@ app.include_router(vendors.router, prefix="/api")
 app.include_router(bills.router, prefix="/api")
 app.include_router(payments.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
+
+# Register QBO OAuth router (no prefix - router has /api/qbo prefix)
+app.include_router(qbo_oauth.router)
 
 
 @app.get("/health")

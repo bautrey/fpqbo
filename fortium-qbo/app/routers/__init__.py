@@ -8,6 +8,7 @@ from app.routers import (
     invoices,
     pages,
     payments,
+    qbo_oauth,
     reports,
     vendors,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "invoices",
     "pages",
     "payments",
+    "qbo_oauth",
     "reports",
     "vendors",
 ]

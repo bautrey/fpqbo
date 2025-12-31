@@ -18,6 +18,10 @@ services:
       - GOOGLE_ALLOWED_DOMAIN=${GOOGLE_ALLOWED_DOMAIN:-fortiumpartners.com}
       - DATABASE_URL=sqlite:///./data/fortium-qbo.db
       - BASE_URL=http://localhost:8086
+      # QBO OAuth credentials
+      - QBO_CLIENT_ID=${QBO_CLIENT_ID}
+      - QBO_CLIENT_SECRET=${QBO_CLIENT_SECRET}
+      - QBO_REDIRECT_URI=${QBO_REDIRECT_URI:-}
     volumes:
       - .:/app:delegated
       - ./data:/app/data

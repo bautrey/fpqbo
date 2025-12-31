@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # QBO OAuth (Optional - for Phase 3+)
     qbo_client_id: str | None = None
     qbo_client_secret: SecretStr | None = None
+    qbo_redirect_uri: str | None = None  # Defaults to {base_url}/api/qbo/callback
+
+    # DEPRECATED - tokens now stored in database (kept for migration)
     qbo_access_token: SecretStr | None = None
     qbo_refresh_token: str | None = None
     qbo_company_id: str | None = None
@@ -43,6 +46,16 @@ class Settings(BaseSettings):
     def session_max_age_seconds(self) -> int:
         """Session max age in seconds for cookie configuration."""
         return self.session_max_age_days * 24 * 60 * 60
+
+    @property
+    def qbo_callback_url(self) -> str:
+        """Get QBO OAuth callback URL."""
+        return self.qbo_redirect_uri or f"{self.base_url}/callback"
+
+    @property
+    def qbo_configured(self) -> bool:
+        """Check if QBO OAuth is configured."""
+        return bool(self.qbo_client_id and self.qbo_client_secret)
 
     @field_validator("app_secret_key")
     @classmethod

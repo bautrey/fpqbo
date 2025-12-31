@@ -1,0 +1,43 @@
+# Render.com Blueprint
+# Deploy with: render blueprint apply
+# Note: Replaces existing qbo-oauth service to reuse registered redirect URI
+
+services:
+  - type: web
+    name: qbo-oauth
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      # Application
+      - key: APP_SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "false"
+      - key: BASE_URL
+        value: https://qbo-oauth.onrender.com
+
+      # Google OAuth (set manually in Render dashboard)
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_ALLOWED_DOMAIN
+        value: fortiumpartners.com
+      - key: INITIAL_ADMIN_EMAIL
+        sync: false
+
+      # QBO OAuth (set manually in Render dashboard)
+      - key: QBO_CLIENT_ID
+        sync: false
+      - key: QBO_CLIENT_SECRET
+        sync: false
+
+      # Database - use Render's persistent disk or external PostgreSQL
+      - key: DATABASE_URL
+        value: sqlite:///./data/fortium-qbo.db
+    disk:
+      name: fortium-qbo-data
+      mountPath: /app/data
+      sizeGB: 1
