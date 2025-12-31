@@ -2,9 +2,11 @@
 
 from app.routers import (
     accounts,
+    auth,
     bills,
     customers,
     invoices,
+    pages,
     payments,
     reports,
     vendors,
@@ -12,9 +14,11 @@ from app.routers import (
 
 __all__ = [
     "accounts",
+    "auth",
     "bills",
     "customers",
     "invoices",
+    "pages",
     "payments",
     "reports",
     "vendors",

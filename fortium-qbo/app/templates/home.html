@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block title %}Home - fortium-qbo{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center" style="margin-top: 100px;">
+    <div class="col-md-6">
+        <div class="card shadow">
+            <div class="card-body text-center p-5">
+                <h4 class="card-title mb-4">Welcome to fortium-qbo</h4>
+                <p class="card-text">You are authenticated as:</p>
+                <p class="fw-bold fs-5">{{ user.email }}</p>
+                <hr class="my-4">
+                <p class="text-muted small mb-4">Admin features coming in Phase 3+</p>
+                <a href="/auth/logout" class="btn btn-outline-secondary">
+                    <i class="bi bi-box-arrow-right me-2"></i>Logout
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

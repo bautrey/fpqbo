@@ -5,9 +5,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
-from app.routers import accounts, bills, customers, invoices, payments, reports, vendors
+from app.routers import accounts, auth, bills, customers, invoices, pages, payments, reports, vendors
 
 logger = logging.getLogger(__name__)
 
@@ -19,16 +20,50 @@ async def lifespan(app: FastAPI):
 
     Startup:
     - Log application start
-    - Initialize database connection
+    - Seed initial admin user if INITIAL_ADMIN_EMAIL is configured
 
     Shutdown:
     - Log application shutdown
-    - Cleanup resources
     """
     # Startup
     logger.info("fortium-qbo starting up...")
     logger.info(f"Debug mode: {settings.debug}")
     logger.info(f"Database: {settings.database_url}")
+
+    # Seed initial admin user
+    if settings.initial_admin_email:
+        from datetime import datetime
+        from sqlalchemy import select
+        from app.database import SessionLocal
+        from app.models import AdminUser
+
+        db = SessionLocal()
+        try:
+            # Check if user already exists
+            existing_user = db.execute(
+                select(AdminUser).where(AdminUser.email == settings.initial_admin_email)
+            ).scalar_one_or_none()
+
+            if existing_user:
+                logger.info(f"Initial admin user already exists: {settings.initial_admin_email}")
+            else:
+                # Create initial admin user
+                admin_user = AdminUser(
+                    email=settings.initial_admin_email,
+                    is_super_admin=True,
+                    created_at=datetime.utcnow(),
+                )
+                db.add(admin_user)
+                db.commit()
+                logger.info(f"Created initial admin user: {settings.initial_admin_email}")
+
+        except Exception as e:
+            logger.error(f"Failed to seed initial admin user: {e}", exc_info=True)
+            db.rollback()
+        finally:
+            db.close()
+    else:
+        logger.info("No INITIAL_ADMIN_EMAIL configured, skipping admin seeding")
 
     yield
 
@@ -45,8 +80,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Add session middleware for OAuth state storage
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.app_secret_key.get_secret_value(),
+)
+
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Include auth and pages routers
+app.include_router(auth.router)
+app.include_router(pages.router)
 
 # Register QBO entity routers
 app.include_router(invoices.router, prefix="/api")
@@ -64,9 +109,9 @@ async def health_check() -> dict:
     return {"status": "healthy"}
 
 
-@app.get("/")
-async def root() -> dict:
-    """Root endpoint with API info."""
+@app.get("/api")
+async def api_root() -> dict:
+    """API root endpoint with available endpoints info."""
     return {
         "name": "fortium-qbo",
         "version": "0.1.0",

@@ -47,6 +47,56 @@ Visit http://localhost:8000/health to verify the server is running.
 
 When `DEBUG=true`, API docs are available at http://localhost:8000/docs
 
+## Authentication Setup
+
+### Google OAuth Configuration
+
+1. **Create OAuth 2.0 Credentials:**
+   - Visit [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+   - Create new project or select existing project
+   - Enable "Google+ API" (for profile info)
+   - Create "OAuth 2.0 Client ID" credentials
+   - Application type: "Web application"
+
+2. **Configure Authorized Redirect URIs:**
+   ```
+   http://localhost:8000/auth/callback    (local development)
+   https://your-domain.com/auth/callback  (production)
+   ```
+
+3. **Update .env:**
+   ```bash
+   cp .env.example .env
+   # Edit .env and set:
+   GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+   GOOGLE_CLIENT_SECRET=your-client-secret
+   INITIAL_ADMIN_EMAIL=your-email@fortiumpartners.com
+   ```
+
+4. **Start application:**
+   ```bash
+   uvicorn app.main:app --reload
+   ```
+
+   On first startup, the initial admin user will be created automatically.
+
+5. **Access admin UI:**
+   - Visit http://localhost:8000/login
+   - Click "Sign in with Google"
+   - Authenticate with your @fortiumpartners.com Google account
+
+### Adding Additional Admins
+
+Currently, admin users must be added directly to the database:
+
+```bash
+sqlite3 data/fortium-qbo.db
+INSERT INTO admin_users (email, is_super_admin, created_at)
+VALUES ('newadmin@fortiumpartners.com', 0, datetime('now'));
+```
+
+Admin management UI will be added in a future phase.
+
 ### Configuration
 
 Copy `.env.example` to `.env` and configure the following required settings:
@@ -158,8 +208,8 @@ Production deployment targets:
 
 ## Phase Roadmap
 
-- ✅ **Phase 1:** Core Infrastructure (this phase)
-- ⬜ **Phase 2:** Admin UI - Google OAuth authentication
+- ✅ **Phase 1:** Core Infrastructure
+- ✅ **Phase 2:** Admin UI - Google OAuth authentication (this phase)
 - ⬜ **Phase 3:** QBO OAuth - Token management and refresh
 - ⬜ **Phase 4:** API Gateway - API key authentication
 - ⬜ **Phase 5:** QBO Proxy - Entity endpoints

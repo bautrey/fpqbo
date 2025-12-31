@@ -1,0 +1,83 @@
+"""Pages router for HTML template rendering."""
+
+import logging
+
+from fastapi import APIRouter, Request
+from fastapi.responses import RedirectResponse
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
+
+from app.database import SessionLocal
+from app.models import AdminUser
+from app.services.session_service import verify_session
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["pages"])
+
+# Initialize Jinja2 templates
+templates = Jinja2Templates(directory="app/templates")
+
+
+@router.get("/login")
+async def login_page(request: Request):
+    """
+    Render login page with Google Sign-In button.
+
+    Public endpoint - no authentication required.
+
+    Returns:
+        HTML login page template
+    """
+    return templates.TemplateResponse("login.html", {"request": request})
+
+
+@router.get("/")
+async def home_page(request: Request):
+    """
+    Render authenticated home page.
+
+    Checks for valid session cookie:
+    - If authenticated: Show home page with user email
+    - If not authenticated: Redirect to /login
+
+    Returns:
+        HTML home page if authenticated
+        Redirect to /login if not authenticated
+    """
+    # Check for session cookie
+    session_token = request.cookies.get("auth_session")
+
+    if not session_token:
+        logger.info("No session cookie, redirecting to login")
+        return RedirectResponse(url="/login", status_code=302)
+
+    # Verify session
+    email = verify_session(session_token)
+
+    if not email:
+        logger.info("Invalid session token, redirecting to login")
+        return RedirectResponse(url="/login", status_code=302)
+
+    # Get user from database
+    db = SessionLocal()
+    try:
+        admin_user = db.execute(
+            select(AdminUser).where(AdminUser.email == email)
+        ).scalar_one_or_none()
+
+        if not admin_user:
+            logger.warning(f"Session valid but user not in database: {email}")
+            return RedirectResponse(url="/login", status_code=302)
+
+        # Render home page with user context
+        return templates.TemplateResponse(
+            "home.html",
+            {
+                "request": request,
+                "user": admin_user,
+            }
+        )
+
+    finally:
+        db.close()
