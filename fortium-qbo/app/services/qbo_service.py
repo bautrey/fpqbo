@@ -195,6 +195,20 @@ class QBOService:
         invoice = await asyncio.to_thread(_fetch)
         return invoice.to_dict() if invoice else None
 
+    async def get_invoice_by_doc_number(
+        self, company_id: int, doc_number: str
+    ) -> dict[str, Any] | None:
+        """Get a specific invoice by DocNumber."""
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            results = Invoice.where(f"DocNumber = '{doc_number}'", qb=client)
+            return results[0] if results else None
+
+        invoice = await asyncio.to_thread(_fetch)
+        return invoice.to_dict() if invoice else None
+
     async def get_customers(
         self, company_id: int, active_only: bool = True, max_results: int = 1000
     ) -> list[dict[str, Any]]:

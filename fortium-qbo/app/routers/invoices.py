@@ -43,13 +43,33 @@ async def list_invoices(
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
 
+@router.get("/by-doc-number/{doc_number}", response_model=dict[str, Any])
+async def get_invoice_by_doc_number(
+    doc_number: str,
+    company_id: int = Query(..., description="QBO company ID"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Get a specific invoice by DocNumber (e.g., "10044")."""
+    try:
+        invoice = await qbo.get_invoice_by_doc_number(company_id, doc_number)
+        if not invoice:
+            raise HTTPException(status_code=404, detail=f"Invoice with DocNumber '{doc_number}' not found")
+        return invoice
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
 @router.get("/{invoice_id}", response_model=dict[str, Any])
 async def get_invoice(
     invoice_id: int,
     company_id: int = Query(..., description="QBO company ID"),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
-    """Get a specific invoice by ID."""
+    """Get a specific invoice by internal QBO ID."""
     try:
         invoice = await qbo.get_invoice_by_id(company_id, invoice_id)
         if not invoice:
