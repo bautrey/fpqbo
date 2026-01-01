@@ -182,19 +182,6 @@ async def _fetch_company_name(realm_id: str, access_token: str) -> str:
         return "Unknown Company"
 
 
-@router.get("/api/qbo/debug-config")
-async def debug_config():
-    """Debug endpoint to check QBO configuration (no secrets exposed)."""
-    return {
-        "qbo_configured": settings.qbo_configured,
-        "qbo_us_configured": settings.qbo_us_configured,
-        "qbo_ca_configured": settings.qbo_ca_configured,
-        "us_client_id_prefix": settings.qbo_client_id[:20] + "..." if settings.qbo_client_id else None,
-        "ca_client_id_prefix": settings.qbo_ca_client_id[:20] + "..." if settings.qbo_ca_client_id else None,
-        "callback_url": settings.qbo_callback_url,
-    }
-
-
 @router.get("/api/qbo/connect")
 async def qbo_connect(request: Request, region: str = "US"):
     """
@@ -243,12 +230,6 @@ async def qbo_connect(request: Request, region: str = "US"):
     request.session["qbo_oauth_region"] = region
 
     # Build authorization URL
-    credentials = settings.get_qbo_credentials(region)
-    logger.info(f"Region={region}, credentials found={credentials is not None}")
-    if credentials:
-        client_id, _ = credentials
-        logger.info(f"Using client_id: {client_id[:20]}... for region {region}")
-
     auth_client = _get_intuit_auth_client(region=region)
     if not auth_client:
         return _error_response(f"Failed to create auth client for region {region}")
@@ -259,7 +240,6 @@ async def qbo_connect(request: Request, region: str = "US"):
     )
 
     logger.info(f"Redirecting to Intuit OAuth ({region}), state={state[:8]}...")
-    logger.info(f"Auth URL client_id check: {auth_url[:150]}...")
 
     return RedirectResponse(url=auth_url, status_code=302)
 
