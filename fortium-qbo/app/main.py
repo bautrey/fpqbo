@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
-from app.routers import accounts, api_keys, auth, bills, customers, invoices, pages, payments, qbo_oauth, reports, vendors
+from app.routers import accounts, api_keys, auth, bills, companies, customers, invoices, pages, payments, qbo_oauth, reports, vendors
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,7 @@ app.include_router(pages.router)
 app.include_router(api_keys.router)
 
 # Register QBO entity routers
+app.include_router(companies.router, prefix="/api")
 app.include_router(invoices.router, prefix="/api")
 app.include_router(accounts.router, prefix="/api")
 app.include_router(customers.router, prefix="/api")
@@ -129,6 +130,7 @@ async def api_root() -> dict:
         "version": "0.1.0",
         "description": "QuickBooks Online API Gateway",
         "endpoints": {
+            "companies": "/api/companies",
             "invoices": "/api/invoices",
             "accounts": "/api/accounts",
             "customers": "/api/customers",
