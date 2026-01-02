@@ -88,13 +88,16 @@ class QBOService:
         return datetime.utcnow() + TOKEN_REFRESH_BUFFER >= company.token_expires_at
 
     def _refresh_token(self, company: QboCompany) -> None:
-        """Refresh OAuth token and persist to database."""
+        """Refresh OAuth token and persist to database.
+
+        IMPORTANT: Intuit rotates refresh tokens on each refresh.
+        If we successfully refresh but fail to save, we lose the new token.
+        """
         credentials = settings.get_qbo_credentials(company.region)
         if not credentials:
             raise ValueError(f"QBO credentials not configured for region: {company.region}")
 
         client_id, client_secret = credentials
-        # Both US and Canada now use production environment
         environment = "production"
 
         auth_client = AuthClient(
@@ -106,18 +109,38 @@ class QBOService:
             redirect_uri=settings.qbo_callback_url,
         )
 
-        # Refresh the token
-        auth_client.refresh()
+        try:
+            # Refresh the token - this INVALIDATES the old refresh token!
+            auth_client.refresh()
 
-        # Update company record
-        company.access_token = auth_client.access_token
-        company.refresh_token = auth_client.refresh_token
-        company.token_expires_at = datetime.utcnow() + timedelta(hours=1)
-        company.last_refreshed_at = datetime.utcnow()
-        company.token_status = "active"
+            # CRITICAL: Save new tokens immediately
+            # If this fails, the old refresh token is already invalid
+            company.access_token = auth_client.access_token
+            company.refresh_token = auth_client.refresh_token
+            company.token_expires_at = datetime.utcnow() + timedelta(hours=1)
+            company.last_refreshed_at = datetime.utcnow()
+            company.token_status = "active"
 
-        self.db.commit()
-        logger.info(f"Refreshed token for company {company.code}")
+            self.db.commit()
+            logger.info(f"Refreshed token for company {company.code}")
+
+        except Exception as e:
+            # Log the error with details
+            logger.error(f"Token refresh failed for company {company.code}: {e}")
+
+            # Try to mark the company as needing reconnection
+            try:
+                self.db.rollback()
+                company.token_status = "refresh_failed"
+                self.db.commit()
+            except Exception as db_error:
+                logger.error(f"Failed to update token_status: {db_error}")
+                self.db.rollback()
+
+            raise ValueError(
+                f"Token refresh failed for {company.code}. "
+                f"Please reconnect at /admin/companies. Error: {e}"
+            )
 
     def _get_client(self, company: QboCompany) -> QuickBooks:
         """Get or create QuickBooks client for a company."""

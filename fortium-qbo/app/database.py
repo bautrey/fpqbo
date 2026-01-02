@@ -18,7 +18,15 @@ def _get_engine_kwargs() -> dict:
     """Get database engine kwargs based on database URL."""
     if settings.database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
-    return {"pool_pre_ping": True, "pool_size": 5, "max_overflow": 10}
+    # For Supabase Transaction pooler: use minimal local pooling
+    # since Supabase handles connection pooling on their side
+    return {
+        "pool_pre_ping": True,  # Check connections before use
+        "pool_size": 3,  # Small local pool
+        "max_overflow": 2,  # Allow some overflow
+        "pool_recycle": 300,  # Recycle connections every 5 min
+        "pool_timeout": 30,  # Wait up to 30s for connection
+    }
 
 
 # Create engine
