@@ -539,3 +539,37 @@ async def refresh_company_token(request: Request, company_id: int):
         return {"success": False, "message": f"Error: {str(e)}", "reconnect_required": False}
     finally:
         db.close()
+
+
+@router.post("/api/qbo/refresh-all")
+async def refresh_all_tokens(request: Request):
+    """
+    Manually refresh all active QBO company tokens.
+
+    This is useful for:
+    - Recovering from token issues
+    - Ensuring all tokens are fresh before maintenance
+    - Testing the refresh mechanism
+
+    Requires admin authentication.
+
+    Returns:
+        JSON with lists of refreshed, failed, and skipped companies
+    """
+    # Verify authentication
+    try:
+        email = _require_auth(request)
+        logger.info(f"Manual refresh-all initiated by {email}")
+    except RedirectResponse as redirect:
+        return {"error": "Authentication required"}
+
+    from app.services.token_refresh_scheduler import token_scheduler
+    results = await token_scheduler.refresh_all_now()
+
+    return {
+        "success": True,
+        "refreshed": results["refreshed"],
+        "failed": results["failed"],
+        "skipped": results["skipped"],
+        "message": f"Refreshed {len(results['refreshed'])} tokens, {len(results['failed'])} failed",
+    }

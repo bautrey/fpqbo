@@ -71,10 +71,15 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("No INITIAL_ADMIN_EMAIL configured, skipping admin seeding")
 
+    # Start background token refresh scheduler
+    from app.services.token_refresh_scheduler import token_scheduler
+    await token_scheduler.start()
+
     yield
 
     # Shutdown
     logger.info("fortium-qbo shutting down...")
+    await token_scheduler.stop()
 
 
 app = FastAPI(
