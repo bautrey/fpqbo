@@ -335,6 +335,7 @@ async def qbo_callback(
                 existing.access_token = access_token
                 existing.refresh_token = refresh_token
                 existing.token_expires_at = datetime.utcnow() + timedelta(hours=1)
+                existing.refresh_token_expires_at = datetime.utcnow() + timedelta(days=100)
                 existing.token_status = "active"
                 existing.last_refreshed_at = datetime.utcnow()
                 if company_name != "Unknown Company":
@@ -352,6 +353,7 @@ async def qbo_callback(
                     access_token=access_token,
                     refresh_token=refresh_token,
                     token_expires_at=datetime.utcnow() + timedelta(hours=1),
+                    refresh_token_expires_at=datetime.utcnow() + timedelta(days=100),
                     token_status="active",
                     last_refreshed_at=datetime.utcnow(),
                 )
@@ -432,6 +434,7 @@ async def disconnect_company(request: Request, company_id: int):
         company.access_token = None
         company.refresh_token = None
         company.token_expires_at = None
+        company.refresh_token_expires_at = None
         company.token_status = "disconnected"
 
         db.commit()
@@ -508,6 +511,7 @@ async def refresh_company_token(request: Request, company_id: int):
             company.access_token = auth_client.access_token
             company.refresh_token = auth_client.refresh_token
             company.token_expires_at = datetime.utcnow() + timedelta(hours=1)
+            company.refresh_token_expires_at = datetime.utcnow() + timedelta(days=100)
             company.token_status = "active"
             company.last_refreshed_at = datetime.utcnow()
 

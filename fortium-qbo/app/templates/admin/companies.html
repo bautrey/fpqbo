@@ -93,6 +93,7 @@
                             <th>Realm ID</th>
                             <th>Status</th>
                             <th>Token Expiration</th>
+                            <th>Refresh Token</th>
                             <th>Last Refreshed</th>
                             <th class="text-end">Actions</th>
                         </tr>
@@ -116,6 +117,11 @@
                                 </span>
                             </td>
                             <td>{{ company.token_status_info.expires_display }}</td>
+                            <td>
+                                <span class="badge {{ company.refresh_token_status_info.refresh_css_class }}">
+                                    {{ company.refresh_token_status_info.refresh_expires_display }}
+                                </span>
+                            </td>
                             <td>
                                 {% if company.last_refreshed_at %}
                                 <small>{{ company.last_refreshed_at.strftime('%Y-%m-%d %H:%M') }} UTC</small>

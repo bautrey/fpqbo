@@ -118,6 +118,7 @@ class QBOService:
             company.access_token = auth_client.access_token
             company.refresh_token = auth_client.refresh_token
             company.token_expires_at = datetime.utcnow() + timedelta(hours=1)
+            company.refresh_token_expires_at = datetime.utcnow() + timedelta(days=100)
             company.last_refreshed_at = datetime.utcnow()
             company.token_status = "active"
 

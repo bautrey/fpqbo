@@ -12,7 +12,7 @@ from app.database import SessionLocal
 from app.models import AdminUser, ApiKey
 from app.models.qbo_company import QboCompany
 from app.services.session_service import verify_session
-from app.utils.token_status import get_token_status
+from app.utils.token_status import get_refresh_token_status, get_token_status
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,10 @@ async def companies_page(request: Request, message: str | None = None):
         for company in companies:
             company.token_status_info = get_token_status(
                 company.token_expires_at,
+                company.token_status,
+            )
+            company.refresh_token_status_info = get_refresh_token_status(
+                company.refresh_token_expires_at,
                 company.token_status,
             )
 

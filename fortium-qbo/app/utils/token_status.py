@@ -12,6 +12,13 @@ class TokenStatus(NamedTuple):
     expires_display: str  # Human-readable expiration
 
 
+class RefreshTokenStatus(NamedTuple):
+    """Refresh token status with display information."""
+    refresh_status: str          # "healthy", "warning", "critical", "expired", "unknown"
+    refresh_expires_display: str  # Human-readable expiration (e.g., "Expires in 99d")
+    refresh_css_class: str       # Bootstrap badge class
+
+
 def get_token_status(
     token_expires_at: datetime | None,
     token_status_db: str | None = None,
@@ -69,6 +76,63 @@ def get_token_status(
         css_class="bg-success",
         expires_display=f"Expires in {expires_display}",
     )
+
+
+def get_refresh_token_status(
+    refresh_token_expires_at: datetime | None,
+    token_status_db: str | None = None,
+) -> RefreshTokenStatus:
+    """
+    Calculate refresh token status for display.
+
+    Args:
+        refresh_token_expires_at: Refresh token expiration timestamp
+        token_status_db: Status from database ("active", "disconnected", etc.)
+
+    Returns:
+        RefreshTokenStatus with status, display text, and CSS class
+    """
+    if token_status_db == "disconnected" or refresh_token_expires_at is None:
+        return RefreshTokenStatus(
+            refresh_status="unknown",
+            refresh_expires_display="Unknown",
+            refresh_css_class="bg-secondary",
+        )
+
+    now = datetime.utcnow()
+
+    # Check if expired
+    if refresh_token_expires_at <= now:
+        delta = now - refresh_token_expires_at
+        days = delta.days
+        return RefreshTokenStatus(
+            refresh_status="expired",
+            refresh_expires_display=f"Expired {days}d ago",
+            refresh_css_class="bg-danger",
+        )
+
+    # Calculate days remaining
+    delta = refresh_token_expires_at - now
+    days = delta.days
+
+    if days > 30:
+        return RefreshTokenStatus(
+            refresh_status="healthy",
+            refresh_expires_display=f"Expires in {days}d",
+            refresh_css_class="bg-success",
+        )
+    elif days >= 7:
+        return RefreshTokenStatus(
+            refresh_status="warning",
+            refresh_expires_display=f"Expires in {days}d",
+            refresh_css_class="bg-warning text-dark",
+        )
+    else:
+        return RefreshTokenStatus(
+            refresh_status="critical",
+            refresh_expires_display=f"Expires in {days}d",
+            refresh_css_class="bg-danger",
+        )
 
 
 def _format_time_remaining(delta: timedelta) -> str:

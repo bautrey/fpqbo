@@ -41,6 +41,7 @@ class QboCompany(Base):
     token_expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     token_status: Mapped[str] = mapped_column(String(20), default="active")
     last_refreshed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    refresh_token_expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
