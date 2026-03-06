@@ -12,7 +12,8 @@ from quickbooks import QuickBooks
 from quickbooks.objects.account import Account
 from quickbooks.objects.attachable import Attachable
 from quickbooks.objects.bill import Bill
-from quickbooks.objects.billpayment import BillPayment
+from quickbooks.objects.billpayment import BillPayment, BillPaymentLine, CheckPayment
+from quickbooks.objects.base import Ref, LinkedTxn
 from quickbooks.objects.company_info import CompanyInfo
 from quickbooks.objects.companycurrency import CompanyCurrency
 from quickbooks.objects.creditmemo import CreditMemo
@@ -438,6 +439,87 @@ class QBOService:
 
         result = await asyncio.to_thread(_fetch)
         return result.to_dict() if result else None
+
+    async def get_bill_payments_by_bill_id(
+        self, company_id: int, bill_id: int
+    ) -> list[dict[str, Any]]:
+        """Get bill payments linked to a specific bill."""
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return BillPayment.where(
+                f"Line.LinkedTxn.TxnId = '{bill_id}' AND Line.LinkedTxn.TxnType = 'Bill'",
+                qb=client,
+            )
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def create_bill_payment(
+        self, company_id: int, payment_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a BillPayment in QBO.
+
+        Args:
+            company_id: QBO company ID
+            payment_data: Dict with PayType, VendorRef, TotalAmt, Line, etc.
+
+        Returns:
+            Created BillPayment as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            bp = BillPayment()
+            bp.PayType = payment_data.get("PayType", "Check")
+            bp.TotalAmt = payment_data["TotalAmt"]
+            bp.PrivateNote = payment_data.get("PrivateNote", "")
+            bp.DocNumber = payment_data.get("DocNumber", "")
+
+            if "VendorRef" in payment_data:
+                ref = Ref()
+                ref.value = str(payment_data["VendorRef"]["value"])
+                ref.name = payment_data["VendorRef"].get("name")
+                bp.VendorRef = ref
+
+            if "APAccountRef" in payment_data:
+                ref = Ref()
+                ref.value = str(payment_data["APAccountRef"]["value"])
+                ref.name = payment_data["APAccountRef"].get("name")
+                bp.APAccountRef = ref
+
+            if "DepartmentRef" in payment_data:
+                ref = Ref()
+                ref.value = str(payment_data["DepartmentRef"]["value"])
+                ref.name = payment_data["DepartmentRef"].get("name")
+                bp.DepartmentRef = ref
+
+            if payment_data.get("PayType") == "Check" and "CheckPayment" in payment_data:
+                cp = CheckPayment()
+                if "BankAccountRef" in payment_data["CheckPayment"]:
+                    ref = Ref()
+                    ref.value = str(payment_data["CheckPayment"]["BankAccountRef"]["value"])
+                    ref.name = payment_data["CheckPayment"]["BankAccountRef"].get("name")
+                    cp.BankAccountRef = ref
+                cp.PrintStatus = payment_data["CheckPayment"].get("PrintStatus", "NotSet")
+                bp.CheckPayment = cp
+
+            for line_data in payment_data.get("Line", []):
+                line = BillPaymentLine()
+                line.Amount = line_data["Amount"]
+                for txn_data in line_data.get("LinkedTxn", []):
+                    txn = LinkedTxn()
+                    txn.TxnId = str(txn_data["TxnId"])
+                    txn.TxnType = txn_data["TxnType"]
+                    line.LinkedTxn.append(txn)
+                bp.Line.append(line)
+
+            return bp.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # CreditMemo
