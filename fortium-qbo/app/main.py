@@ -8,7 +8,13 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
-from app.routers import accounts, api_keys, auth, bills, companies, customers, invoices, pages, payments, qbo_oauth, reports, vendors
+from app.routers import (
+    accounts, api_keys, attachments, auth, bill_payments, bills, companies,
+    company_info, credit_memos, customers, departments, deposits, employees,
+    estimates, invoices, items, journal_entries, pages, payments, purchase_orders,
+    purchases, qbo_oauth, recurring, reference, refund_receipts, reports,
+    sales_receipts, tax, time_activities, transfers, vendor_credits, vendors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +123,28 @@ app.include_router(bills.router, prefix="/api")
 app.include_router(payments.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
 
+# New entity routers
+app.include_router(bill_payments.router, prefix="/api")
+app.include_router(credit_memos.router, prefix="/api")
+app.include_router(deposits.router, prefix="/api")
+app.include_router(estimates.router, prefix="/api")
+app.include_router(journal_entries.router, prefix="/api")
+app.include_router(purchases.router, prefix="/api")
+app.include_router(purchase_orders.router, prefix="/api")
+app.include_router(refund_receipts.router, prefix="/api")
+app.include_router(sales_receipts.router, prefix="/api")
+app.include_router(transfers.router, prefix="/api")
+app.include_router(vendor_credits.router, prefix="/api")
+app.include_router(items.router, prefix="/api")
+app.include_router(employees.router, prefix="/api")
+app.include_router(departments.router, prefix="/api")
+app.include_router(time_activities.router, prefix="/api")
+app.include_router(company_info.router, prefix="/api")
+app.include_router(tax.router, prefix="/api")
+app.include_router(reference.router, prefix="/api")
+app.include_router(attachments.router, prefix="/api")
+app.include_router(recurring.router, prefix="/api")
+
 # Register QBO OAuth router (no prefix - router has /api/qbo prefix)
 app.include_router(qbo_oauth.router)
 
@@ -143,6 +171,27 @@ async def api_root() -> dict:
             "bills": "/api/bills",
             "payments": "/api/payments",
             "reports": "/api/reports",
+            "bill-payments": "/api/bill-payments",
+            "credit-memos": "/api/credit-memos",
+            "deposits": "/api/deposits",
+            "estimates": "/api/estimates",
+            "journal-entries": "/api/journal-entries",
+            "purchases": "/api/purchases",
+            "purchase-orders": "/api/purchase-orders",
+            "refund-receipts": "/api/refund-receipts",
+            "sales-receipts": "/api/sales-receipts",
+            "transfers": "/api/transfers",
+            "vendor-credits": "/api/vendor-credits",
+            "items": "/api/items",
+            "employees": "/api/employees",
+            "departments": "/api/departments",
+            "time-activities": "/api/time-activities",
+            "company-info": "/api/company/info",
+            "preferences": "/api/company/preferences",
+            "tax": "/api/tax",
+            "reference": "/api/reference",
+            "attachments": "/api/attachments",
+            "recurring-transactions": "/api/recurring-transactions",
         },
         "docs": "/docs" if settings.debug else None,
     }

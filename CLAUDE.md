@@ -1,42 +1,80 @@
 # Fortium Partners QuickBooks Online Integration
 
 **Project:** fpqbo - QuickBooks Online API Integration & Testing
-**Purpose:** Direct QBO API access for testing, debugging, and building utilities
-**Status:** Initial setup
+**Status:** Production (deployed on Render)
 
-## Overview
+## Architecture
 
-This project provides direct access to QuickBooks Online API for:
-- Testing and debugging account balance lookups
-- Understanding QBO API response structures
-- Building reusable utilities for financial calculations
-- Supporting n8n workflow development
+The `fortium-qbo/` directory contains a FastAPI service deployed at **https://qbo-oauth.onrender.com** that:
+- Manages OAuth2 tokens for multiple QBO companies in a Supabase PostgreSQL database
+- Auto-refreshes tokens via a background scheduler (every 45 minutes)
+- Exposes a REST API for QBO data access (invoices, accounts, vendors, etc.)
+- Provides an admin UI for managing connected companies (Google OAuth login)
 
-## Setup
+### Connected Companies
+| Code | Company | Region |
+|------|---------|--------|
+| FOR-138 | Fortium Partners, LP. | US |
+| FOR-971 | Fortium Partners Canada LP | CA |
 
-### Prerequisites
-- Python 3.11+
-- QuickBooks Online account with API access
-- OAuth2 credentials from Intuit Developer Portal
+### IMPORTANT: Token Management
+- **DO NOT** use the root `.env` file for QBO access — those credentials are from a deprecated Intuit app
+- Tokens are managed automatically by the deployed service's background scheduler
+- To access QBO data, use the deployed API with an API key:
+  ```bash
+  curl -H "X-API-Key: <your-key>" https://qbo-oauth.onrender.com/api/invoices/
+  ```
+- Admin UI: https://qbo-oauth.onrender.com (requires @fortiumpartners.com Google login)
 
-### Environment
-```bash
-cd /Users/burke/projects/fpqbo
-source venv/bin/activate
-```
+## API Endpoints
 
-### Environment Variables (.env)
-```
-QBO_CLIENT_ID=your_client_id
-QBO_CLIENT_SECRET=your_client_secret
-QBO_COMPANY_ID=1208415120
-QBO_REDIRECT_URI=https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl
-QBO_ACCESS_TOKEN=your_access_token
-QBO_REFRESH_TOKEN=your_refresh_token
-QBO_REALM_ID=1208415120
-```
+All `/api/*` endpoints require `X-API-Key` header.
 
-## Account Structure (Fortium Partners)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/companies/` | List companies for API key |
+| GET | `/api/invoices/` | List invoices |
+| GET | `/api/invoices/by-doc-number/{doc_number}` | Get invoice by doc number |
+| GET | `/api/customers/` | List customers |
+| GET | `/api/vendors/` | List vendors |
+| GET | `/api/accounts/` | Chart of accounts |
+| GET | `/api/bills/` | List bills |
+| GET | `/api/payments/` | List payments |
+| GET | `/api/bill-payments/` | List bill payments |
+| GET | `/api/credit-memos/` | List credit memos |
+| GET | `/api/deposits/` | List deposits |
+| GET | `/api/estimates/` | List estimates |
+| GET | `/api/journal-entries/` | List journal entries |
+| GET | `/api/purchases/` | List purchases |
+| GET | `/api/purchase-orders/` | List purchase orders |
+| GET | `/api/refund-receipts/` | List refund receipts |
+| GET | `/api/sales-receipts/` | List sales receipts |
+| GET | `/api/transfers/` | List transfers |
+| GET | `/api/vendor-credits/` | List vendor credits |
+| GET | `/api/items/` | List items |
+| GET | `/api/employees/` | List employees |
+| GET | `/api/departments/` | List departments |
+| GET | `/api/time-activities/` | List time activities |
+| GET | `/api/company/info` | Company info |
+| GET | `/api/company/preferences` | Company preferences |
+| GET | `/api/tax/agencies` | List tax agencies |
+| GET | `/api/tax/codes` | List tax codes |
+| GET | `/api/tax/rates` | List tax rates |
+| GET | `/api/reference/currencies` | List company currencies |
+| GET | `/api/reference/exchange-rates` | List exchange rates |
+| GET | `/api/reference/payment-methods` | List payment methods |
+| GET | `/api/reference/terms` | List terms |
+| GET | `/api/reference/classes` | List tracking classes |
+| GET | `/api/reference/customer-types` | List customer types |
+| GET | `/api/attachments/` | List attachments |
+| GET | `/api/recurring-transactions/` | List recurring transactions |
+| GET | `/api/reports/trial-balance` | Trial Balance report |
+| GET | `/api/reports/balance-sheet` | Balance Sheet report |
+| GET | `/api/reports/profit-and-loss` | P&L report |
+
+All list endpoints also have `GET /{id}` variants for fetching by ID (except exchange rates, company info, and preferences).
+
+## Account Structure (Fortium Partners US)
 
 ### Capital Accounts
 - **310000** - Paid-In Capital (liability parent)
@@ -54,44 +92,14 @@ QBO_REALM_ID=1208415120
 - **214000** - GP Distribution Owed
 - **104000** - Operating Chase Checking
 
-## Key Scripts
-
-- `qbo_client.py` - QBO API client with OAuth2 handling
-- `trial_balance.py` - Fetch and parse Trial Balance report
-- `test_accounts.py` - Test account lookup functions
-- `refresh_token.py` - Refresh OAuth2 tokens
-
-## Usage
+## Development
 
 ```bash
-# Activate environment
-source venv/bin/activate
-
-# Test API connection
-python test_connection.py
-
-# Fetch trial balance
-python trial_balance.py
-
-# Debug specific accounts
-python test_accounts.py 310000 219500
+cd fortium-qbo
+source ../venv/bin/activate
+uvicorn app.main:app --reload
 ```
 
-## API Reference
-
-### Trial Balance Endpoint
-```
-GET /v3/company/{companyId}/reports/TrialBalance
-```
-
-### Query Parameters
-- `minorversion=65` - API version
-- `start_date` / `end_date` - Date range (optional)
-- `accounting_method` - Accrual or Cash
-
-## Notes
-
-- OAuth tokens expire after 1 hour; use refresh token to renew
-- Company ID (Realm ID): 1208415120
-- Parent accounts appear in Summary rows in Trial Balance response
-- Child accounts appear in nested Rows.Row arrays
+### Legacy Scripts (root directory)
+These use the deprecated root `.env` and **no longer work**:
+- `qbo_client_deprecated.py`, `trial_balance.py`, `refresh_token.py`, etc.

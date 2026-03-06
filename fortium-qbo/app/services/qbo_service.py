@@ -10,11 +10,39 @@ from intuitlib.client import AuthClient
 from intuitlib.enums import Scopes
 from quickbooks import QuickBooks
 from quickbooks.objects.account import Account
+from quickbooks.objects.attachable import Attachable
 from quickbooks.objects.bill import Bill
+from quickbooks.objects.billpayment import BillPayment
+from quickbooks.objects.company_info import CompanyInfo
+from quickbooks.objects.companycurrency import CompanyCurrency
+from quickbooks.objects.creditmemo import CreditMemo
 from quickbooks.objects.customer import Customer
+from quickbooks.objects.customertype import CustomerType
+from quickbooks.objects.department import Department
+from quickbooks.objects.deposit import Deposit
+from quickbooks.objects.employee import Employee
+from quickbooks.objects.estimate import Estimate
+from quickbooks.objects.exchangerate import ExchangeRate
 from quickbooks.objects.invoice import Invoice
+from quickbooks.objects.item import Item
+from quickbooks.objects.journalentry import JournalEntry
 from quickbooks.objects.payment import Payment
+from quickbooks.objects.paymentmethod import PaymentMethod
+from quickbooks.objects.preferences import Preferences
+from quickbooks.objects.purchase import Purchase
+from quickbooks.objects.purchaseorder import PurchaseOrder
+from quickbooks.objects.recurringtransaction import RecurringTransaction
+from quickbooks.objects.refundreceipt import RefundReceipt
+from quickbooks.objects.salesreceipt import SalesReceipt
+from quickbooks.objects.taxagency import TaxAgency
+from quickbooks.objects.taxcode import TaxCode
+from quickbooks.objects.taxrate import TaxRate
+from quickbooks.objects.term import Term
+from quickbooks.objects.timeactivity import TimeActivity
+from quickbooks.objects.trackingclass import Class as TrackingClass
+from quickbooks.objects.transfer import Transfer
 from quickbooks.objects.vendor import Vendor
+from quickbooks.objects.vendorcredit import VendorCredit
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -382,6 +410,767 @@ class QBOService:
 
         payment = await asyncio.to_thread(_fetch)
         return payment.to_dict() if payment else None
+
+    # -------------------------------------------------------------------------
+    # BillPayment
+    # -------------------------------------------------------------------------
+
+    async def get_bill_payments(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return BillPayment.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_bill_payment_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return BillPayment.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # CreditMemo
+    # -------------------------------------------------------------------------
+
+    async def get_credit_memos(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return CreditMemo.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_credit_memo_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return CreditMemo.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Deposit
+    # -------------------------------------------------------------------------
+
+    async def get_deposits(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Deposit.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_deposit_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Deposit.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Estimate
+    # -------------------------------------------------------------------------
+
+    async def get_estimates(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Estimate.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_estimate_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Estimate.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # JournalEntry
+    # -------------------------------------------------------------------------
+
+    async def get_journal_entries(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return JournalEntry.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_journal_entry_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return JournalEntry.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Purchase
+    # -------------------------------------------------------------------------
+
+    async def get_purchases(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Purchase.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_purchase_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Purchase.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # PurchaseOrder
+    # -------------------------------------------------------------------------
+
+    async def get_purchase_orders(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return PurchaseOrder.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_purchase_order_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return PurchaseOrder.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # RefundReceipt
+    # -------------------------------------------------------------------------
+
+    async def get_refund_receipts(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return RefundReceipt.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_refund_receipt_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return RefundReceipt.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # SalesReceipt
+    # -------------------------------------------------------------------------
+
+    async def get_sales_receipts(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return SalesReceipt.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_sales_receipt_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return SalesReceipt.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Transfer
+    # -------------------------------------------------------------------------
+
+    async def get_transfers(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Transfer.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_transfer_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Transfer.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # VendorCredit
+    # -------------------------------------------------------------------------
+
+    async def get_vendor_credits(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return VendorCredit.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_vendor_credit_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return VendorCredit.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Item
+    # -------------------------------------------------------------------------
+
+    async def get_items(
+        self, company_id: int, active_only: bool = True, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            if active_only:
+                return Item.filter(Active=True, max_results=max_results, qb=client)
+            return Item.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_item_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Item.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Employee
+    # -------------------------------------------------------------------------
+
+    async def get_employees(
+        self, company_id: int, active_only: bool = True, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            if active_only:
+                return Employee.filter(Active=True, max_results=max_results, qb=client)
+            return Employee.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_employee_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Employee.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Department
+    # -------------------------------------------------------------------------
+
+    async def get_departments(
+        self, company_id: int, active_only: bool = True, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            if active_only:
+                return Department.filter(Active=True, max_results=max_results, qb=client)
+            return Department.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_department_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Department.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # TimeActivity
+    # -------------------------------------------------------------------------
+
+    async def get_time_activities(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return TimeActivity.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_time_activity_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return TimeActivity.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # CompanyInfo
+    # -------------------------------------------------------------------------
+
+    async def get_company_info(
+        self, company_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            results = CompanyInfo.all(max_results=1, qb=client)
+            return results[0] if results else None
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Preferences
+    # -------------------------------------------------------------------------
+
+    async def get_preferences(
+        self, company_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Preferences.get(qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # TaxAgency
+    # -------------------------------------------------------------------------
+
+    async def get_tax_agencies(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return TaxAgency.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_tax_agency_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return TaxAgency.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # TaxCode
+    # -------------------------------------------------------------------------
+
+    async def get_tax_codes(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return TaxCode.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_tax_code_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return TaxCode.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # TaxRate
+    # -------------------------------------------------------------------------
+
+    async def get_tax_rates(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return TaxRate.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_tax_rate_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return TaxRate.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # CompanyCurrency
+    # -------------------------------------------------------------------------
+
+    async def get_company_currencies(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return CompanyCurrency.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_company_currency_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return CompanyCurrency.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # ExchangeRate (list only - no get by ID)
+    # -------------------------------------------------------------------------
+
+    async def get_exchange_rates(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return ExchangeRate.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    # -------------------------------------------------------------------------
+    # PaymentMethod
+    # -------------------------------------------------------------------------
+
+    async def get_payment_methods(
+        self, company_id: int, active_only: bool = True, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            if active_only:
+                return PaymentMethod.filter(Active=True, max_results=max_results, qb=client)
+            return PaymentMethod.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_payment_method_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return PaymentMethod.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Term
+    # -------------------------------------------------------------------------
+
+    async def get_terms(
+        self, company_id: int, active_only: bool = True, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            if active_only:
+                return Term.filter(Active=True, max_results=max_results, qb=client)
+            return Term.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_term_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Term.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # TrackingClass
+    # -------------------------------------------------------------------------
+
+    async def get_classes(
+        self, company_id: int, active_only: bool = True, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            if active_only:
+                return TrackingClass.filter(Active=True, max_results=max_results, qb=client)
+            return TrackingClass.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_class_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return TrackingClass.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # CustomerType
+    # -------------------------------------------------------------------------
+
+    async def get_customer_types(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return CustomerType.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_customer_type_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return CustomerType.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # Attachable
+    # -------------------------------------------------------------------------
+
+    async def get_attachables(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Attachable.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_attachable_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Attachable.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
+
+    # -------------------------------------------------------------------------
+    # RecurringTransaction
+    # -------------------------------------------------------------------------
+
+    async def get_recurring_transactions(
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return RecurringTransaction.all(max_results=max_results, qb=client)
+
+        items = await asyncio.to_thread(_fetch)
+        return [i.to_dict() for i in items]
+
+    async def get_recurring_transaction_by_id(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any] | None:
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return RecurringTransaction.get(entity_id, qb=client)
+
+        result = await asyncio.to_thread(_fetch)
+        return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
     # Reports (Direct API - SDK doesn't support QBO Reports)
