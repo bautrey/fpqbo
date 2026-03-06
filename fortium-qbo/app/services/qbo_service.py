@@ -443,15 +443,28 @@ class QBOService:
     async def get_bill_payments_by_bill_id(
         self, company_id: int, bill_id: int
     ) -> list[dict[str, Any]]:
-        """Get bill payments linked to a specific bill."""
+        """Get bill payments linked to a specific bill.
+
+        QBO doesn't support filtering by LinkedTxn in queries,
+        so we fetch all and filter in Python.
+        """
         company = self._get_company(company_id)
         client = self._get_client(company)
+        bill_id_str = str(bill_id)
 
         def _fetch():
-            return BillPayment.where(
-                f"Line.LinkedTxn.TxnId = '{bill_id}' AND Line.LinkedTxn.TxnType = 'Bill'",
-                qb=client,
-            )
+            all_payments = BillPayment.all(max_results=1000, qb=client)
+            matched = []
+            for bp in all_payments:
+                for line in bp.Line:
+                    for txn in line.LinkedTxn:
+                        if txn.TxnId == bill_id_str and txn.TxnType == "Bill":
+                            matched.append(bp)
+                            break
+                    else:
+                        continue
+                    break
+            return matched
 
         items = await asyncio.to_thread(_fetch)
         return [i.to_dict() for i in items]
