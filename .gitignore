@@ -26,3 +26,7 @@ oauth-service/
 
 # Nested virtual environments
 yir2025/venv/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
