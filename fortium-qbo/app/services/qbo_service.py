@@ -1326,7 +1326,7 @@ class QBOService:
 
         params = {"accounting_method": accounting_method}
         if as_of_date:
-            params["date"] = as_of_date.strftime("%Y-%m-%d")
+            params["end_date"] = as_of_date.strftime("%Y-%m-%d")
 
         return await self._fetch_report(company, "BalanceSheet", params)
 
