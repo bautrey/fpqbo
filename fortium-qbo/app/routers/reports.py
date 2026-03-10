@@ -50,7 +50,7 @@ async def get_trial_balance(
 @router.get("/balance-sheet", response_model=dict[str, Any])
 async def get_balance_sheet(
     company_id: int = Query(..., description="QBO company ID"),
-    as_of_date: datetime | None = Query(None, description="Balance sheet date"),
+    as_of_date: str | None = Query(None, description="Balance sheet date (YYYY-MM-DD)"),
     accounting_method: str = Query("Accrual", description="Accrual or Cash"),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
@@ -60,9 +60,11 @@ async def get_balance_sheet(
     Returns QBO's standard Balance Sheet report showing assets, liabilities, and equity.
     """
     try:
+        # Parse string date to datetime for the service
+        parsed_date = datetime.strptime(as_of_date, "%Y-%m-%d") if as_of_date else None
         return await qbo.get_balance_sheet(
             company_id=company_id,
-            as_of_date=as_of_date,
+            as_of_date=parsed_date,
             accounting_method=accounting_method,
         )
     except ValueError as e:
