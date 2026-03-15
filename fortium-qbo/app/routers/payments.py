@@ -1,5 +1,6 @@
 """Payment endpoints using QBO SDK."""
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -23,13 +24,17 @@ def _get_service(db: Session = Depends(get_db)) -> QBOService:
 @router.get("/", response_model=list[dict[str, Any]])
 async def list_payments(
     company_id: int = Query(..., description="QBO company ID"),
+    start_date: datetime | None = Query(None, description="Filter from date"),
+    end_date: datetime | None = Query(None, description="Filter to date"),
     max_results: int = Query(1000, le=1000, description="Max results"),
     qbo: QBOService = Depends(_get_service),
 ) -> list[dict[str, Any]]:
-    """List all payments."""
+    """List payments, optionally filtered by date range."""
     try:
         return await qbo.get_payments(
             company_id=company_id,
+            start_date=start_date,
+            end_date=end_date,
             max_results=max_results,
         )
     except ValueError as e:

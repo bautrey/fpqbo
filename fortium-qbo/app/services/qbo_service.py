@@ -387,13 +387,24 @@ class QBOService:
         return bill.to_dict() if bill else None
 
     async def get_payments(
-        self, company_id: int, max_results: int = 1000
+        self,
+        company_id: int,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        max_results: int = 1000,
     ) -> list[dict[str, Any]]:
-        """Get payments."""
+        """Get payments, optionally filtered by date range."""
         company = self._get_company(company_id)
         client = self._get_client(company)
 
         def _fetch():
+            if start_date and end_date:
+                return Payment.where(
+                    f"TxnDate >= '{start_date.strftime('%Y-%m-%d')}' "
+                    f"AND TxnDate <= '{end_date.strftime('%Y-%m-%d')}'",
+                    max_results=max_results,
+                    qb=client,
+                )
             return Payment.all(max_results=max_results, qb=client)
 
         payments = await asyncio.to_thread(_fetch)
