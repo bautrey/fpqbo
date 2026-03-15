@@ -13,7 +13,7 @@ from quickbooks.objects.account import Account
 from quickbooks.objects.attachable import Attachable
 from quickbooks.objects.bill import Bill
 from quickbooks.objects.billpayment import BillPayment, BillPaymentLine, CheckPayment
-from quickbooks.objects.base import Ref, LinkedTxn
+from quickbooks.objects.base import Address, EmailAddress, LinkedTxn, PhoneNumber, Ref
 from quickbooks.objects.company_info import CompanyInfo
 from quickbooks.objects.companycurrency import CompanyCurrency
 from quickbooks.objects.creditmemo import CreditMemo
@@ -317,6 +317,145 @@ class QBOService:
 
         vendor = await asyncio.to_thread(_fetch)
         return vendor.to_dict() if vendor else None
+
+    async def create_customer(
+        self, company_id: int, customer_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a Customer in QBO.
+
+        Args:
+            company_id: QBO company ID
+            customer_data: Dict with DisplayName, CompanyName, GivenName,
+                FamilyName, Title, Suffix, PrimaryEmailAddr, PrimaryPhone,
+                Mobile, BillAddr, ShipAddr, SalesTermRef, CurrencyRef,
+                PaymentMethodRef, Notes, PrintOnCheckName, Taxable, Active,
+                ParentRef, etc.
+
+        Returns:
+            Created Customer as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            cust = Customer()
+
+            # Simple string/bool fields
+            for field in (
+                "DisplayName", "CompanyName", "GivenName", "FamilyName",
+                "Title", "Suffix", "Notes", "PrintOnCheckName",
+            ):
+                if field in customer_data:
+                    setattr(cust, field, customer_data[field])
+
+            if "Taxable" in customer_data:
+                cust.Taxable = customer_data["Taxable"]
+            if "Active" in customer_data:
+                cust.Active = customer_data["Active"]
+
+            # Email
+            if "PrimaryEmailAddr" in customer_data:
+                email = EmailAddress()
+                email.Address = customer_data["PrimaryEmailAddr"].get("Address", "")
+                cust.PrimaryEmailAddr = email
+
+            # Phone fields
+            for phone_field in ("PrimaryPhone", "Mobile"):
+                if phone_field in customer_data:
+                    phone = PhoneNumber()
+                    phone.FreeFormNumber = customer_data[phone_field].get("FreeFormNumber", "")
+                    setattr(cust, phone_field, phone)
+
+            # Address fields
+            for addr_field in ("BillAddr", "ShipAddr"):
+                if addr_field in customer_data:
+                    addr_data = customer_data[addr_field]
+                    addr = Address()
+                    for key in ("Line1", "Line2", "City", "CountrySubDivisionCode", "PostalCode", "Country"):
+                        if key in addr_data:
+                            setattr(addr, key, addr_data[key])
+                    setattr(cust, addr_field, addr)
+
+            # Ref fields
+            for ref_field in ("SalesTermRef", "CurrencyRef", "PaymentMethodRef", "ParentRef"):
+                if ref_field in customer_data:
+                    ref = Ref()
+                    ref.value = str(customer_data[ref_field]["value"])
+                    ref.name = customer_data[ref_field].get("name")
+                    setattr(cust, ref_field, ref)
+
+            return cust.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
+
+    async def create_vendor(
+        self, company_id: int, vendor_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a Vendor in QBO.
+
+        Args:
+            company_id: QBO company ID
+            vendor_data: Dict with DisplayName, CompanyName, GivenName,
+                FamilyName, Title, Suffix, PrimaryEmailAddr, PrimaryPhone,
+                Mobile, BillAddr, TermRef, CurrencyRef, TaxIdentifier,
+                AcctNum, PrintOnCheckName, Active, Notes, etc.
+
+        Returns:
+            Created Vendor as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            vnd = Vendor()
+
+            # Simple string fields
+            for field in (
+                "DisplayName", "CompanyName", "GivenName", "FamilyName",
+                "Title", "Suffix", "Notes", "PrintOnCheckName",
+                "TaxIdentifier", "AcctNum",
+            ):
+                if field in vendor_data:
+                    setattr(vnd, field, vendor_data[field])
+
+            if "Active" in vendor_data:
+                vnd.Active = vendor_data["Active"]
+
+            # Email
+            if "PrimaryEmailAddr" in vendor_data:
+                email = EmailAddress()
+                email.Address = vendor_data["PrimaryEmailAddr"].get("Address", "")
+                vnd.PrimaryEmailAddr = email
+
+            # Phone fields
+            for phone_field in ("PrimaryPhone", "Mobile"):
+                if phone_field in vendor_data:
+                    phone = PhoneNumber()
+                    phone.FreeFormNumber = vendor_data[phone_field].get("FreeFormNumber", "")
+                    setattr(vnd, phone_field, phone)
+
+            # Address
+            if "BillAddr" in vendor_data:
+                addr_data = vendor_data["BillAddr"]
+                addr = Address()
+                for key in ("Line1", "Line2", "City", "CountrySubDivisionCode", "PostalCode", "Country"):
+                    if key in addr_data:
+                        setattr(addr, key, addr_data[key])
+                vnd.BillAddr = addr
+
+            # Ref fields (Vendor uses TermRef, not SalesTermRef)
+            for ref_field in ("TermRef", "CurrencyRef"):
+                if ref_field in vendor_data:
+                    ref = Ref()
+                    ref.value = str(vendor_data[ref_field]["value"])
+                    ref.name = vendor_data[ref_field].get("name")
+                    setattr(vnd, ref_field, ref)
+
+            return vnd.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
 
     async def get_accounts(
         self, company_id: int, active_only: bool = True, max_results: int = 1000

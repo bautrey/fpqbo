@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -36,6 +36,46 @@ async def list_vendors(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.post("/", response_model=dict[str, Any], status_code=201)
+async def create_vendor(
+    company_id: int = Query(..., description="QBO company ID"),
+    vendor_data: dict[str, Any] = Body(..., description="Vendor data"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Create a vendor in QBO.
+
+    Example body:
+    {
+        "DisplayName": "Office Supplies Inc",
+        "CompanyName": "Office Supplies Inc.",
+        "GivenName": "Jane",
+        "FamilyName": "Smith",
+        "PrimaryEmailAddr": {"Address": "jane@officesupplies.com"},
+        "PrimaryPhone": {"FreeFormNumber": "555-987-6543"},
+        "BillAddr": {
+            "Line1": "456 Oak Ave",
+            "City": "Austin",
+            "CountrySubDivisionCode": "TX",
+            "PostalCode": "73301",
+            "Country": "US"
+        },
+        "TermRef": {"value": "3"},
+        "CurrencyRef": {"value": "USD", "name": "United States Dollar"},
+        "TaxIdentifier": "12-3456789",
+        "AcctNum": "VENDOR-001",
+        "PrintOnCheckName": "Office Supplies Inc.",
+        "Active": true,
+        "Notes": "Preferred vendor"
+    }
+    """
+    try:
+        return await qbo.create_vendor(company_id, vendor_data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 

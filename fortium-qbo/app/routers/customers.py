@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -36,6 +36,44 @@ async def list_customers(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.post("/", response_model=dict[str, Any], status_code=201)
+async def create_customer(
+    company_id: int = Query(..., description="QBO company ID"),
+    customer_data: dict[str, Any] = Body(..., description="Customer data"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Create a customer in QBO.
+
+    Example body:
+    {
+        "DisplayName": "Acme Corp",
+        "CompanyName": "Acme Corporation",
+        "GivenName": "John",
+        "FamilyName": "Doe",
+        "PrimaryEmailAddr": {"Address": "john@acme.com"},
+        "PrimaryPhone": {"FreeFormNumber": "555-123-4567"},
+        "BillAddr": {
+            "Line1": "123 Main St",
+            "City": "San Francisco",
+            "CountrySubDivisionCode": "CA",
+            "PostalCode": "94105",
+            "Country": "US"
+        },
+        "SalesTermRef": {"value": "3"},
+        "CurrencyRef": {"value": "USD", "name": "United States Dollar"},
+        "Notes": "Important customer",
+        "Taxable": true,
+        "Active": true
+    }
+    """
+    try:
+        return await qbo.create_customer(company_id, customer_data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
