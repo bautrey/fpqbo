@@ -1500,6 +1500,27 @@ class QBOService:
 
         return await self._fetch_report(company, "ProfitAndLoss", params)
 
+    async def get_general_ledger(
+        self,
+        company_id: int,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        account: str | None = None,
+        accounting_method: str = "Accrual",
+    ) -> dict[str, Any]:
+        """Get General Ledger report (all transactions by account)."""
+        company = self._get_company(company_id)
+
+        params = {"accounting_method": accounting_method}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        if account:
+            params["account"] = account
+
+        return await self._fetch_report(company, "GeneralLedger", params)
+
 
 def get_qbo_service(db: Session) -> QBOService:
     """Factory function to create QBOService instance."""

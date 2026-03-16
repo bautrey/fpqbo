@@ -97,3 +97,32 @@ async def get_profit_and_loss(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.get("/general-ledger", response_model=dict[str, Any])
+async def get_general_ledger(
+    company_id: int = Query(..., description="QBO company ID"),
+    start_date: str | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: str | None = Query(None, description="End date (YYYY-MM-DD)"),
+    account: str | None = Query(None, description="Comma-separated account IDs to filter"),
+    accounting_method: str = Query("Accrual", description="Accrual or Cash"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """
+    Get General Ledger report.
+
+    Returns all transactions grouped by account within a date range.
+    Use `account` param to filter to specific accounts (comma-separated QBO account IDs).
+    """
+    try:
+        return await qbo.get_general_ledger(
+            company_id=company_id,
+            start_date=start_date,
+            end_date=end_date,
+            account=account,
+            accounting_method=accounting_method,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
