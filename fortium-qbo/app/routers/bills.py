@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -32,6 +32,21 @@ async def list_bills(
             company_id=company_id,
             max_results=max_results,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.delete("/{bill_id}", response_model=dict[str, Any])
+async def delete_bill(
+    bill_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Delete a specific bill by ID."""
+    try:
+        return await qbo.delete_bill(company_id, bill_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

@@ -525,6 +525,30 @@ class QBOService:
         bill = await asyncio.to_thread(_fetch)
         return bill.to_dict() if bill else None
 
+    async def delete_bill(
+        self, company_id: int, bill_id: int
+    ) -> dict[str, Any]:
+        """Delete a bill in QBO.
+
+        Args:
+            company_id: QBO company ID
+            bill_id: QBO Bill ID to delete
+
+        Returns:
+            Deleted Bill as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _delete():
+            bill = Bill.get(bill_id, qb=client)
+            if not bill:
+                raise ValueError(f"Bill {bill_id} not found")
+            return bill.delete(qb=client)
+
+        result = await asyncio.to_thread(_delete)
+        return result.to_dict() if hasattr(result, 'to_dict') else {"Id": str(bill_id), "status": "Deleted"}
+
     async def get_payments(
         self,
         company_id: int,
