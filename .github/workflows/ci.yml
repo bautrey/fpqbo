@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'fortium-qbo/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'fortium-qbo/**'
+      - '.github/workflows/ci.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fortium-qbo
+    env:
+      # Dummy values to satisfy pydantic-settings at import time.
+      # Tests stub out all network/QBO calls; these are never used in real auth.
+      APP_SECRET_KEY: ci-test-secret-key-at-least-32-characters-long
+      GOOGLE_CLIENT_ID: ci-test-client-id
+      GOOGLE_CLIENT_SECRET: ci-test-client-secret
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: 'fortium-qbo/requirements-dev.txt'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: ${{ github.workspace }}
+        run: pytest fortium-qbo/tests/ -v
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render Deploy
+        run: |
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
