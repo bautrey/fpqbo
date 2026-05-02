@@ -369,3 +369,180 @@ def test_vendor_credits_router_enforces_api_key_dependency():
 
     dep_callables = [d.dependency for d in vendor_credits.router.dependencies]
     assert verify_api_key in dep_callables
+
+
+# ---------------------------------------------------------------------------
+# Null-valued ref regression tests for the rest of the create_* family.
+#
+# Mirrors the test_create_bill_payment_handles_null_refs pattern: send a
+# payload where one or more ref keys are present-but-null, and assert no
+# TypeError ('NoneType' object is not subscriptable) bubbles up.
+# ---------------------------------------------------------------------------
+
+
+def test_create_customer_handles_null_refs(monkeypatch):
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    sentinel = _Sentinel()
+    monkeypatch.setattr(
+        qbo_service_module.Customer, "save",
+        lambda self, qb=None: sentinel(self),
+        raising=True,
+    )
+
+    payload = {
+        "DisplayName": "Null Ref Co.",
+        "SalesTermRef": None,
+        "CurrencyRef": {"value": "USD"},
+        "PaymentMethodRef": None,
+        "ParentRef": None,
+    }
+
+    _run(svc.create_customer(1, payload))
+
+    cust = sentinel.captured
+    assert cust is not None, "Customer.save() was never called"
+    assert cust.DisplayName == "Null Ref Co."
+    # Provided ref -> populated
+    assert cust.CurrencyRef is not None
+    assert cust.CurrencyRef.value == "USD"
+    # Null-valued refs -> silently skipped (stay at the model's default)
+    assert cust.SalesTermRef is None
+    assert cust.PaymentMethodRef is None
+    assert cust.ParentRef is None
+
+
+def test_create_vendor_handles_null_refs(monkeypatch):
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    sentinel = _Sentinel()
+    monkeypatch.setattr(
+        qbo_service_module.Vendor, "save",
+        lambda self, qb=None: sentinel(self),
+        raising=True,
+    )
+
+    payload = {
+        "DisplayName": "Null Ref Vendor",
+        "TermRef": None,
+        "CurrencyRef": None,
+    }
+
+    _run(svc.create_vendor(2, payload))
+
+    vnd = sentinel.captured
+    assert vnd is not None, "Vendor.save() was never called"
+    assert vnd.DisplayName == "Null Ref Vendor"
+    assert vnd.TermRef is None
+    assert vnd.CurrencyRef is None
+
+
+def test_create_bill_handles_null_refs(monkeypatch):
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    sentinel = _Sentinel()
+    monkeypatch.setattr(
+        qbo_service_module.Bill, "save",
+        lambda self, qb=None: sentinel(self),
+        raising=True,
+    )
+
+    payload = {
+        "VendorRef": {"value": "123"},
+        "TxnDate": "2026-04-30",
+        "DueDate": "2026-05-30",
+        "DocNumber": "BILL-NULL",
+        # Both top-level refs and per-line detail refs sent as null
+        "APAccountRef": None,
+        "DepartmentRef": None,
+        "CurrencyRef": None,
+        "SalesTermRef": None,
+        "Line": [
+            {
+                "Amount": 100.00,
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": "60"},
+                    "ClassRef": None,
+                    "CustomerRef": None,
+                    "TaxCodeRef": None,
+                },
+            },
+        ],
+    }
+
+    _run(svc.create_bill(1, payload))
+
+    bill = sentinel.captured
+    assert bill is not None, "Bill.save() was never called"
+    assert bill.VendorRef.value == "123"
+    # Null top-level refs -> skipped
+    assert bill.APAccountRef is None
+    assert bill.DepartmentRef is None
+    # CurrencyRef has a default empty Ref() in python-quickbooks, so
+    # confirm the .value didn't get clobbered to a null subscript crash.
+    assert bill.SalesTermRef is None
+
+    # Null per-line refs -> skipped, but the populated AccountRef survives
+    detail = bill.Line[0].AccountBasedExpenseLineDetail
+    assert detail.AccountRef.value == "60"
+    assert detail.ClassRef is None
+    assert detail.CustomerRef is None
+    assert detail.TaxCodeRef is None
+
+
+def test_create_vendor_credit_handles_null_refs(monkeypatch):
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    sentinel = _Sentinel()
+    monkeypatch.setattr(
+        qbo_service_module.VendorCredit, "save",
+        lambda self, qb=None: sentinel(self),
+        raising=True,
+    )
+
+    payload = {
+        "VendorRef": {"value": "123"},
+        "TxnDate": "2026-04-30",
+        "DocNumber": "VC-NULL",
+        "TotalAmt": 100.00,
+        "APAccountRef": None,
+        "DepartmentRef": None,
+        "CurrencyRef": None,
+        "Line": [
+            {
+                "Amount": 100.00,
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": "60"},
+                    "ClassRef": None,
+                    "CustomerRef": None,
+                    "TaxCodeRef": None,
+                },
+            },
+        ],
+    }
+
+    _run(svc.create_vendor_credit(2, payload))
+
+    vc = sentinel.captured
+    assert vc is not None, "VendorCredit.save() was never called"
+    assert vc.VendorRef.value == "123"
+    # Null top-level refs -> skipped. APAccountRef and DepartmentRef are not
+    # part of the VendorCredit base model in python-quickbooks, so they simply
+    # don't exist on the object when the inputs are null (no setattr happens).
+    assert not hasattr(vc, "APAccountRef") or vc.APAccountRef is None
+    assert not hasattr(vc, "DepartmentRef") or vc.DepartmentRef is None
+
+    # Null per-line refs -> skipped, populated AccountRef survives
+    detail = vc.Line[0].AccountBasedExpenseLineDetail
+    assert detail.AccountRef.value == "60"
+    assert detail.ClassRef is None
+    assert detail.CustomerRef is None
+    assert detail.TaxCodeRef is None

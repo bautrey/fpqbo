@@ -382,7 +382,7 @@ class QBOService:
 
             # Ref fields
             for ref_field in ("SalesTermRef", "CurrencyRef", "PaymentMethodRef", "ParentRef"):
-                if ref_field in customer_data:
+                if customer_data.get(ref_field):
                     ref = Ref()
                     ref.value = str(customer_data[ref_field]["value"])
                     ref.name = customer_data[ref_field].get("name")
@@ -450,7 +450,7 @@ class QBOService:
 
             # Ref fields (Vendor uses TermRef, not SalesTermRef)
             for ref_field in ("TermRef", "CurrencyRef"):
-                if ref_field in vendor_data:
+                if vendor_data.get(ref_field):
                     ref = Ref()
                     ref.value = str(vendor_data[ref_field]["value"])
                     ref.name = vendor_data[ref_field].get("name")
@@ -583,7 +583,7 @@ class QBOService:
                 "VendorRef", "APAccountRef", "DepartmentRef",
                 "CurrencyRef", "SalesTermRef",
             ):
-                if ref_field in bill_data:
+                if bill_data.get(ref_field):
                     ref = Ref()
                     ref.value = str(bill_data[ref_field]["value"])
                     ref.name = bill_data[ref_field].get("name")
@@ -600,7 +600,7 @@ class QBOService:
                 if "BillableStatus" in detail_data:
                     detail.BillableStatus = detail_data["BillableStatus"]
                 for ref_field in ("AccountRef", "CustomerRef", "ClassRef", "TaxCodeRef"):
-                    if ref_field in detail_data:
+                    if detail_data.get(ref_field):
                         ref = Ref()
                         ref.value = str(detail_data[ref_field]["value"])
                         ref.name = detail_data[ref_field].get("name")
@@ -1084,7 +1084,7 @@ class QBOService:
             for ref_field in (
                 "VendorRef", "APAccountRef", "DepartmentRef", "CurrencyRef",
             ):
-                if ref_field in credit_data:
+                if credit_data.get(ref_field):
                     ref = Ref()
                     ref.value = str(credit_data[ref_field]["value"])
                     ref.name = credit_data[ref_field].get("name")
@@ -1101,7 +1101,7 @@ class QBOService:
                 if "BillableStatus" in detail_data:
                     detail.BillableStatus = detail_data["BillableStatus"]
                 for ref_field in ("AccountRef", "CustomerRef", "ClassRef", "TaxCodeRef"):
-                    if ref_field in detail_data:
+                    if detail_data.get(ref_field):
                         ref = Ref()
                         ref.value = str(detail_data[ref_field]["value"])
                         ref.name = detail_data[ref_field].get("name")
