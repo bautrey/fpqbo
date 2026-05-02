@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -34,6 +34,43 @@ async def list_bills(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.post("/", response_model=dict[str, Any], status_code=201)
+async def create_bill(
+    company_id: int = Query(..., description="QBO company ID"),
+    bill_data: dict[str, Any] = Body(..., description="Bill data"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Create a bill in QBO.
+
+    Example body:
+    {
+        "VendorRef": {"value": "123"},
+        "TxnDate": "2026-04-30",
+        "DueDate": "2026-05-30",
+        "DocNumber": "INV-001-456-Doe",
+        "PrivateNote": "Optional memo",
+        "APAccountRef": {"value": "81"},
+        "Line": [
+            {
+                "Amount": 1000.00,
+                "Description": "Consulting services",
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": "60"},
+                    "ClassRef": {"value": "5000000000000123456"},
+                    "CustomerRef": {"value": "42"}
+                }
+            }
+        ]
+    }
+    """
+    try:
+        return await qbo.create_bill(company_id, bill_data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 

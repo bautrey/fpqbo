@@ -1,6 +1,6 @@
 """VendorCredit endpoints."""
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import verify_api_key
@@ -28,6 +28,42 @@ async def list_vendor_credits(
         return await qbo.get_vendor_credits(company_id=company_id, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.post("/", response_model=dict[str, Any], status_code=201)
+async def create_vendor_credit(
+    company_id: int = Query(..., description="QBO company ID"),
+    credit_data: dict[str, Any] = Body(..., description="VendorCredit data"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Create a vendor credit in QBO.
+
+    Example body:
+    {
+        "VendorRef": {"value": "123"},
+        "TxnDate": "2026-04-30",
+        "DocNumber": "VC-001",
+        "PrivateNote": "Refund for overbilling",
+        "TotalAmt": 250.00,
+        "APAccountRef": {"value": "81"},
+        "Line": [
+            {
+                "Amount": 250.00,
+                "Description": "Credit memo",
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": "60"},
+                    "ClassRef": {"value": "5000000000000123456"}
+                }
+            }
+        ]
+    }
+    """
+    try:
+        return await qbo.create_vendor_credit(company_id, credit_data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 

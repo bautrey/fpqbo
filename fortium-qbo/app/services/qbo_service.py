@@ -17,6 +17,10 @@ from quickbooks.objects.base import Address, EmailAddress, LinkedTxn, PhoneNumbe
 from quickbooks.objects.company_info import CompanyInfo
 from quickbooks.objects.companycurrency import CompanyCurrency
 from quickbooks.objects.creditmemo import CreditMemo
+from quickbooks.objects.detailline import (
+    AccountBasedExpenseLine,
+    AccountBasedExpenseLineDetail,
+)
 from quickbooks.objects.customer import Customer
 from quickbooks.objects.customertype import CustomerType
 from quickbooks.objects.department import Department
@@ -549,6 +553,67 @@ class QBOService:
         result = await asyncio.to_thread(_delete)
         return result.to_dict() if hasattr(result, 'to_dict') else {"Id": str(bill_id), "status": "Deleted"}
 
+    async def create_bill(
+        self, company_id: int, bill_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a Bill in QBO.
+
+        Args:
+            company_id: QBO company ID
+            bill_data: Dict with VendorRef, TxnDate, DueDate, DocNumber,
+                PrivateNote, APAccountRef, DepartmentRef, CurrencyRef, and
+                Line[] (each line: Amount, Description, plus
+                AccountBasedExpenseLineDetail with AccountRef/ClassRef/
+                CustomerRef/TaxCodeRef).
+
+        Returns:
+            Created Bill as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            bill = Bill()
+
+            for field in ("TxnDate", "DueDate", "DocNumber", "PrivateNote"):
+                if field in bill_data:
+                    setattr(bill, field, bill_data[field])
+
+            for ref_field in (
+                "VendorRef", "APAccountRef", "DepartmentRef",
+                "CurrencyRef", "SalesTermRef",
+            ):
+                if ref_field in bill_data:
+                    ref = Ref()
+                    ref.value = str(bill_data[ref_field]["value"])
+                    ref.name = bill_data[ref_field].get("name")
+                    setattr(bill, ref_field, ref)
+
+            for line_data in bill_data.get("Line", []):
+                line = AccountBasedExpenseLine()
+                line.Amount = line_data["Amount"]
+                if "Description" in line_data:
+                    line.Description = line_data["Description"]
+
+                detail_data = line_data.get("AccountBasedExpenseLineDetail", {})
+                detail = AccountBasedExpenseLineDetail()
+                if "BillableStatus" in detail_data:
+                    detail.BillableStatus = detail_data["BillableStatus"]
+                for ref_field in ("AccountRef", "CustomerRef", "ClassRef", "TaxCodeRef"):
+                    if ref_field in detail_data:
+                        ref = Ref()
+                        ref.value = str(detail_data[ref_field]["value"])
+                        ref.name = detail_data[ref_field].get("name")
+                        setattr(detail, ref_field, ref)
+                line.AccountBasedExpenseLineDetail = detail
+
+                bill.Line.append(line)
+
+            return bill.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
+
     async def get_payments(
         self,
         company_id: int,
@@ -987,6 +1052,68 @@ class QBOService:
 
         result = await asyncio.to_thread(_fetch)
         return result.to_dict() if result else None
+
+    async def create_vendor_credit(
+        self, company_id: int, credit_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a VendorCredit in QBO.
+
+        Args:
+            company_id: QBO company ID
+            credit_data: Dict with VendorRef, TxnDate, DocNumber, PrivateNote,
+                TotalAmt, APAccountRef, DepartmentRef, CurrencyRef, and Line[]
+                (each line: Amount, Description, plus AccountBasedExpenseLineDetail
+                with AccountRef/ClassRef/CustomerRef/TaxCodeRef).
+
+        Returns:
+            Created VendorCredit as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            vc = VendorCredit()
+
+            for field in ("TxnDate", "DocNumber", "PrivateNote"):
+                if field in credit_data:
+                    setattr(vc, field, credit_data[field])
+
+            if "TotalAmt" in credit_data:
+                vc.TotalAmt = credit_data["TotalAmt"]
+
+            for ref_field in (
+                "VendorRef", "APAccountRef", "DepartmentRef", "CurrencyRef",
+            ):
+                if ref_field in credit_data:
+                    ref = Ref()
+                    ref.value = str(credit_data[ref_field]["value"])
+                    ref.name = credit_data[ref_field].get("name")
+                    setattr(vc, ref_field, ref)
+
+            for line_data in credit_data.get("Line", []):
+                line = AccountBasedExpenseLine()
+                line.Amount = line_data["Amount"]
+                if "Description" in line_data:
+                    line.Description = line_data["Description"]
+
+                detail_data = line_data.get("AccountBasedExpenseLineDetail", {})
+                detail = AccountBasedExpenseLineDetail()
+                if "BillableStatus" in detail_data:
+                    detail.BillableStatus = detail_data["BillableStatus"]
+                for ref_field in ("AccountRef", "CustomerRef", "ClassRef", "TaxCodeRef"):
+                    if ref_field in detail_data:
+                        ref = Ref()
+                        ref.value = str(detail_data[ref_field]["value"])
+                        ref.name = detail_data[ref_field].get("name")
+                        setattr(detail, ref_field, ref)
+                line.AccountBasedExpenseLineDetail = detail
+
+                vc.Line.append(line)
+
+            return vc.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # Item

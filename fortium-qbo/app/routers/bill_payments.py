@@ -64,6 +64,30 @@ async def create_bill_payment(
         "Line": [{"Amount": 1234.56, "LinkedTxn": [{"TxnId": "789", "TxnType": "Bill"}]}],
         "APAccountRef": {"value": "81"}
     }
+
+    Applying a VendorCredit to a Bill:
+    Set TotalAmt = Bill.TotalAmt - VendorCredit.TotalAmt (the net cash leaving
+    the bank). Provide a single Line entry whose LinkedTxn array contains both
+    the Bill and the VendorCredit; QBO links them and zeroes the credit balance.
+
+    Example (Bill 789 = $1000, VendorCredit 999 = $250, net check = $750):
+    {
+        "PayType": "Check",
+        "VendorRef": {"value": "123"},
+        "TotalAmt": 750.00,
+        "CheckPayment": {"BankAccountRef": {"value": "456"}},
+        "APAccountRef": {"value": "81"},
+        "Line": [{
+            "Amount": 750.00,
+            "LinkedTxn": [
+                {"TxnId": "789", "TxnType": "Bill"},
+                {"TxnId": "999", "TxnType": "VendorCredit"}
+            ]
+        }]
+    }
+
+    This works because the LinkedTxn array is passed straight through to QBO;
+    no special handling is needed in this endpoint.
     """
     try:
         return await qbo.create_bill_payment(company_id, payment_data)
