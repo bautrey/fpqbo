@@ -42,12 +42,3 @@ jobs:
       - name: Run pytest
         working-directory: ${{ github.workspace }}
         run: pytest fortium-qbo/tests/ -v
-
-  deploy:
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Render Deploy
-        run: |
-          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"

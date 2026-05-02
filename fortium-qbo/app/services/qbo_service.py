@@ -730,27 +730,27 @@ class QBOService:
             bp.PrivateNote = payment_data.get("PrivateNote", "")
             bp.DocNumber = payment_data.get("DocNumber", "")
 
-            if "VendorRef" in payment_data:
+            if payment_data.get("VendorRef"):
                 ref = Ref()
                 ref.value = str(payment_data["VendorRef"]["value"])
                 ref.name = payment_data["VendorRef"].get("name")
                 bp.VendorRef = ref
 
-            if "APAccountRef" in payment_data:
+            if payment_data.get("APAccountRef"):
                 ref = Ref()
                 ref.value = str(payment_data["APAccountRef"]["value"])
                 ref.name = payment_data["APAccountRef"].get("name")
                 bp.APAccountRef = ref
 
-            if "DepartmentRef" in payment_data:
+            if payment_data.get("DepartmentRef"):
                 ref = Ref()
                 ref.value = str(payment_data["DepartmentRef"]["value"])
                 ref.name = payment_data["DepartmentRef"].get("name")
                 bp.DepartmentRef = ref
 
-            if payment_data.get("PayType") == "Check" and "CheckPayment" in payment_data:
+            if payment_data.get("PayType") == "Check" and payment_data.get("CheckPayment"):
                 cp = CheckPayment()
-                if "BankAccountRef" in payment_data["CheckPayment"]:
+                if payment_data["CheckPayment"].get("BankAccountRef"):
                     ref = Ref()
                     ref.value = str(payment_data["CheckPayment"]["BankAccountRef"]["value"])
                     ref.name = payment_data["CheckPayment"]["BankAccountRef"].get("name")

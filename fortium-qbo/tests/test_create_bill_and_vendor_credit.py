@@ -260,6 +260,79 @@ def test_create_vendor_credit_omits_optional_ap_account(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_create_bill_payment_handles_null_refs(monkeypatch):
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    sentinel = _Sentinel()
+    monkeypatch.setattr(
+        qbo_service_module.BillPayment, "save",
+        lambda self, qb=None: sentinel(self),
+        raising=True,
+    )
+
+    payload = {
+        "VendorRef": {"value": "1047"},
+        "TxnDate": "2026-05-02",
+        "PrivateNote": "Apply VC 91653 to Bill 90458",
+        "TotalAmt": 0,
+        "PayType": "Check",
+        "CheckPayment": {"PrintStatus": "NotSet", "BankAccountRef": None},
+        "APAccountRef": None,
+        "DepartmentRef": None,
+        "CurrencyRef": {"value": "USD"},
+        "Line": [
+            {"Amount": 95.76, "LinkedTxn": [{"TxnId": "90458", "TxnType": "Bill", "TxnLineId": 0}]},
+            {"Amount": 95.76, "LinkedTxn": [{"TxnId": "91653", "TxnType": "VendorCredit", "TxnLineId": 0}]},
+        ],
+    }
+
+    _run(svc.create_bill_payment(1, payload))
+
+    bp = sentinel.captured
+    assert bp is not None, "BillPayment.save() was never called"
+    # VendorRef was provided -> populated
+    assert bp.VendorRef is not None
+    assert bp.VendorRef.value == "1047"
+    # Null-valued refs are silently skipped, not crashed on
+    assert bp.APAccountRef is None
+    assert bp.DepartmentRef is None
+    # CheckPayment object is built (PayType=Check + dict present), but its
+    # BankAccountRef stays None because the payload sent null.
+    assert bp.CheckPayment is not None
+    assert bp.CheckPayment.BankAccountRef is None
+    assert bp.CheckPayment.PrintStatus == "NotSet"
+    assert len(bp.Line) == 2
+
+
+def test_create_bill_payment_omits_check_payment_when_null(monkeypatch):
+    """PayType=Check but the whole CheckPayment block is null -> skip it."""
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    sentinel = _Sentinel()
+    monkeypatch.setattr(
+        qbo_service_module.BillPayment, "save",
+        lambda self, qb=None: sentinel(self),
+        raising=True,
+    )
+
+    payload = {
+        "VendorRef": {"value": "1047"},
+        "TotalAmt": 0,
+        "PayType": "Check",
+        "CheckPayment": None,
+        "Line": [],
+    }
+
+    _run(svc.create_bill_payment(1, payload))
+
+    bp = sentinel.captured
+    assert bp.CheckPayment is None
+
+
 def test_bills_router_has_post_route():
     from app.routers import bills
 
