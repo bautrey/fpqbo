@@ -63,6 +63,21 @@ async def get_invoice_by_doc_number(
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
 
+@router.delete("/{invoice_id}", response_model=dict[str, Any])
+async def delete_invoice(
+    invoice_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Delete a specific invoice by ID."""
+    try:
+        return await qbo.delete_invoice(company_id, invoice_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
 @router.get("/{invoice_id}", response_model=dict[str, Any])
 async def get_invoice(
     invoice_id: int,

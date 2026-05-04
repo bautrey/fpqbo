@@ -546,3 +546,45 @@ def test_create_vendor_credit_handles_null_refs(monkeypatch):
     assert detail.ClassRef is None
     assert detail.CustomerRef is None
     assert detail.TaxCodeRef is None
+
+
+# ---------------------------------------------------------------------------
+# delete_invoice
+# ---------------------------------------------------------------------------
+
+
+def test_delete_invoice_success(monkeypatch):
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    fake_invoice = SimpleNamespace(delete=lambda qb=None: None)
+
+    monkeypatch.setattr(
+        qbo_service_module.Invoice, "get",
+        classmethod(lambda cls, _id, qb=None: fake_invoice),
+        raising=True,
+    )
+
+    result = _run(svc.delete_invoice(1, 91390))
+
+    assert result == {"Id": "91390", "status": "Deleted"}
+
+
+def test_delete_invoice_router_has_delete_route():
+    from app.routers import invoices
+
+    methods_paths = {
+        (frozenset(r.methods), r.path)
+        for r in invoices.router.routes
+        if hasattr(r, "methods")
+    }
+    assert (frozenset({"DELETE"}), "/invoices/{invoice_id}") in methods_paths
+
+
+def test_delete_invoice_router_enforces_api_key_dependency():
+    from app.dependencies import verify_api_key
+    from app.routers import invoices
+
+    dep_callables = [d.dependency for d in invoices.router.dependencies]
+    assert verify_api_key in dep_callables

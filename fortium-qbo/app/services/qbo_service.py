@@ -553,6 +553,30 @@ class QBOService:
         result = await asyncio.to_thread(_delete)
         return result.to_dict() if hasattr(result, 'to_dict') else {"Id": str(bill_id), "status": "Deleted"}
 
+    async def delete_invoice(
+        self, company_id: int, invoice_id: int
+    ) -> dict[str, Any]:
+        """Delete an invoice in QBO.
+
+        Args:
+            company_id: QBO company ID
+            invoice_id: QBO Invoice ID to delete
+
+        Returns:
+            Deleted Invoice as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _delete():
+            invoice = Invoice.get(invoice_id, qb=client)
+            if not invoice:
+                raise ValueError(f"Invoice {invoice_id} not found")
+            return invoice.delete(qb=client)
+
+        result = await asyncio.to_thread(_delete)
+        return result.to_dict() if hasattr(result, 'to_dict') else {"Id": str(invoice_id), "status": "Deleted"}
+
     async def create_bill(
         self, company_id: int, bill_data: dict[str, Any]
     ) -> dict[str, Any]:
