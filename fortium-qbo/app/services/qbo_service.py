@@ -30,7 +30,12 @@ from quickbooks.objects.estimate import Estimate
 from quickbooks.objects.exchangerate import ExchangeRate
 from quickbooks.objects.invoice import Invoice
 from quickbooks.objects.item import Item
-from quickbooks.objects.journalentry import JournalEntry
+from quickbooks.objects.journalentry import (
+    Entity as JournalEntryEntity,
+    JournalEntry,
+    JournalEntryLine,
+    JournalEntryLineDetail,
+)
 from quickbooks.objects.payment import Payment
 from quickbooks.objects.paymentmethod import PaymentMethod
 from quickbooks.objects.preferences import Preferences
@@ -908,6 +913,139 @@ class QBOService:
 
         result = await asyncio.to_thread(_fetch)
         return result.to_dict() if result else None
+
+    async def create_journal_entry(
+        self, company_id: int, entry_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a JournalEntry in QBO.
+
+        Args:
+            company_id: QBO company ID
+            entry_data: Dict with TxnDate, DocNumber, PrivateNote, Adjustment,
+                CurrencyRef, ExchangeRate, and Line[] (each line: Amount,
+                Description, plus JournalEntryLineDetail with PostingType,
+                AccountRef, ClassRef, DepartmentRef, TaxCodeRef, and an
+                optional Entity {Type, EntityRef}).
+
+        Returns:
+            Created JournalEntry as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            je = JournalEntry()
+
+            for field in ("TxnDate", "DocNumber", "PrivateNote"):
+                if field in entry_data:
+                    setattr(je, field, entry_data[field])
+
+            if "Adjustment" in entry_data:
+                je.Adjustment = entry_data["Adjustment"]
+            if "ExchangeRate" in entry_data:
+                je.ExchangeRate = entry_data["ExchangeRate"]
+            if "TotalAmt" in entry_data:
+                je.TotalAmt = entry_data["TotalAmt"]
+
+            if entry_data.get("CurrencyRef"):
+                ref = Ref()
+                ref.value = str(entry_data["CurrencyRef"]["value"])
+                ref.name = entry_data["CurrencyRef"].get("name")
+                je.CurrencyRef = ref
+
+            for line_data in entry_data.get("Line", []):
+                line = JournalEntryLine()
+                if "Amount" in line_data:
+                    line.Amount = line_data["Amount"]
+                if "Description" in line_data:
+                    line.Description = line_data["Description"]
+                if "DetailType" in line_data:
+                    line.DetailType = line_data["DetailType"]
+
+                detail_data = line_data.get("JournalEntryLineDetail", {}) or {}
+                detail = JournalEntryLineDetail()
+                if "PostingType" in detail_data:
+                    detail.PostingType = detail_data["PostingType"]
+                if "BillableStatus" in detail_data:
+                    detail.BillableStatus = detail_data["BillableStatus"]
+                if "TaxApplicableOn" in detail_data:
+                    detail.TaxApplicableOn = detail_data["TaxApplicableOn"]
+                if "TaxAmount" in detail_data:
+                    detail.TaxAmount = detail_data["TaxAmount"]
+
+                for ref_field in ("AccountRef", "ClassRef", "DepartmentRef", "TaxCodeRef"):
+                    if detail_data.get(ref_field):
+                        ref = Ref()
+                        ref.value = str(detail_data[ref_field]["value"])
+                        ref.name = detail_data[ref_field].get("name")
+                        setattr(detail, ref_field, ref)
+
+                entity_data = detail_data.get("Entity") or detail_data.get("EntityRef")
+                if entity_data:
+                    entity = JournalEntryEntity()
+                    if "Type" in entity_data:
+                        entity.Type = entity_data["Type"]
+                    inner_ref = entity_data.get("EntityRef")
+                    if inner_ref:
+                        ref = Ref()
+                        ref.value = str(inner_ref["value"])
+                        ref.name = inner_ref.get("name")
+                        entity.EntityRef = ref
+                    detail.Entity = entity
+
+                line.JournalEntryLineDetail = detail
+                je.Line.append(line)
+
+            return je.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
+
+    async def void_journal_entry(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any]:
+        """Void a JournalEntry in QBO.
+
+        QBO has no first-class void endpoint for JournalEntry; the SDK's
+        VoidMixin is not applied to this object. We fetch the JE for its
+        SyncToken, then issue a sparse update with operation=update&include=void
+        against the journalentry endpoint.
+
+        Args:
+            company_id: QBO company ID
+            entity_id: QBO JournalEntry ID to void
+
+        Returns:
+            Voided JournalEntry as dict
+        """
+        import json as _json
+
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _void():
+            je = JournalEntry.get(entity_id, qb=client)
+            if not je:
+                raise ValueError(f"JournalEntry {entity_id} not found")
+
+            url = "{0}/company/{1}/journalentry".format(client.api_url, client.company_id)
+            payload = {
+                "Id": str(je.Id),
+                "SyncToken": je.SyncToken,
+                "sparse": True,
+            }
+            params = {"operation": "update", "include": "void"}
+            response = client.post(url, _json.dumps(payload), params=params)
+            if isinstance(response, dict) and "JournalEntry" in response:
+                return JournalEntry.from_json(response["JournalEntry"])
+            return response
+
+        result = await asyncio.to_thread(_void)
+        if hasattr(result, "to_dict"):
+            return result.to_dict()
+        if isinstance(result, dict):
+            return result
+        return {"Id": str(entity_id), "status": "Voided"}
 
     # -------------------------------------------------------------------------
     # Purchase
