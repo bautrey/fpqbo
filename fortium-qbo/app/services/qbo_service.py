@@ -582,6 +582,51 @@ class QBOService:
         result = await asyncio.to_thread(_delete)
         return result.to_dict() if hasattr(result, 'to_dict') else {"Id": str(invoice_id), "status": "Deleted"}
 
+    async def update_bill(
+        self, company_id: int, bill_id: str, sparse_payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Sparse-update a Bill in QBO.
+
+        Builds a POST against /v3/company/{realm}/bill?operation=update with
+        ``Id`` and ``sparse: true`` injected server-side, plus whatever fields
+        the caller supplied (``SyncToken`` is required by QBO). Returns the
+        updated Bill as a dict.
+
+        SyncToken mismatch (QBO error code 5310) raises ValidationException;
+        the router translates that into a 409.
+
+        Args:
+            company_id: QBO company ID
+            bill_id: QBO Bill ID to update
+            sparse_payload: Fields to update (must include SyncToken)
+
+        Returns:
+            Updated Bill as dict
+        """
+        import json as _json
+
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _update():
+            url = "{0}/company/{1}/bill".format(client.api_url, client.company_id)
+            payload = dict(sparse_payload)
+            payload["Id"] = str(bill_id)
+            payload["sparse"] = True
+            params = {"operation": "update"}
+            response = client.post(url, _json.dumps(payload), params=params)
+            if isinstance(response, dict) and "Bill" in response:
+                return Bill.from_json(response["Bill"])
+            return response
+
+        logger.info(f"Updating Bill {bill_id} for company {company.code}")
+        result = await asyncio.to_thread(_update)
+        if hasattr(result, "to_dict"):
+            return result.to_dict()
+        if isinstance(result, dict):
+            return result
+        return {"Id": str(bill_id), "status": "Updated"}
+
     async def create_bill(
         self, company_id: int, bill_data: dict[str, Any]
     ) -> dict[str, Any]:

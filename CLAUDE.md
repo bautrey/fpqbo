@@ -20,11 +20,27 @@ The `fortium-qbo/` directory contains a FastAPI service deployed at **https://qb
 ### IMPORTANT: Token Management
 - **DO NOT** use the root `.env` file for QBO access — those credentials are from a deprecated Intuit app
 - Tokens are managed automatically by the deployed service's background scheduler
-- To access QBO data, use the deployed API with an API key:
-  ```bash
-  curl -H "X-API-Key: <your-key>" https://qbo-oauth.onrender.com/api/invoices/
-  ```
 - Admin UI: https://qbo-oauth.onrender.com (requires @fortiumpartners.com Google login)
+
+### API Keys (macOS Keychain)
+All `/api/*` endpoints require an `X-API-Key` header. Keys are stored in macOS Keychain:
+
+```bash
+# US company (FOR-138) — "Pipeline" key, works for most queries
+security find-generic-password -a "burkestudio" -s "fpqbo-api-key-us" -w
+
+# Canada company (FOR-971)
+security find-generic-password -a "burkestudio" -s "fpqbo-api-key-ca" -w
+```
+
+**Usage:**
+```bash
+API_KEY=$(security find-generic-password -a "burkestudio" -s "fpqbo-api-key-us" -w)
+curl -s -H "X-API-Key: $API_KEY" "https://qbo-oauth.onrender.com/api/invoices/"
+curl -s -H "X-API-Key: $API_KEY" "https://qbo-oauth.onrender.com/api/accounts/"
+```
+
+To create new API keys, use the admin UI or `POST /admin/api-keys/` (requires admin session).
 
 ## API Endpoints
 
@@ -71,6 +87,17 @@ All `/api/*` endpoints require `X-API-Key` header.
 | GET | `/api/reports/trial-balance` | Trial Balance report |
 | GET | `/api/reports/balance-sheet` | Balance Sheet report |
 | GET | `/api/reports/profit-and-loss` | P&L report |
+| GET | `/api/reports/general-ledger` | General Ledger report |
+| POST | `/api/customers/` | Create a customer |
+| POST | `/api/vendors/` | Create a vendor |
+| POST | `/api/bills/` | Create a bill |
+| POST | `/api/bills/{bill_id}` | Update a bill (sparse update) |
+| POST | `/api/bill-payments/` | Create a bill payment (also applies VendorCredit via `LinkedTxn`) |
+| POST | `/api/vendor-credits/` | Create a vendor credit |
+| POST | `/api/journal-entries/` | Create a journal entry |
+| POST | `/api/journal-entries/{id}/void` | Void a journal entry |
+| DELETE | `/api/bills/{bill_id}` | Delete a bill |
+| DELETE | `/api/invoices/{invoice_id}` | Delete an invoice |
 
 All list endpoints also have `GET /{id}` variants for fetching by ID (except exchange rates, company info, and preferences).
 
@@ -99,6 +126,23 @@ cd fortium-qbo
 source ../venv/bin/activate
 uvicorn app.main:app --reload
 ```
+
+### Running tests
+
+`pytest` and `pytest-asyncio` live in `fortium-qbo/requirements-dev.txt` (transitively pulls in `requirements.txt`). The test suite imports `app.config.Settings()`, which validates `APP_SECRET_KEY` (min 32 chars), `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET` at import time, so they must be set even though tests stub all network calls.
+
+From the repo root with the root venv activated:
+
+```bash
+source venv/bin/activate
+pip install -r fortium-qbo/requirements-dev.txt   # one-time
+APP_SECRET_KEY=$(python3 -c "print('a'*32)") \
+  GOOGLE_CLIENT_ID=test \
+  GOOGLE_CLIENT_SECRET=test \
+  pytest fortium-qbo/tests/ -v
+```
+
+CI (`.github/workflows/ci.yml`) sets the same dummies on the `test` job. Render deploys are handled by Render's own GitHub auto-deploy (the workflow no longer pings a deploy hook).
 
 ### Legacy Scripts (root directory)
 These use the deprecated root `.env` and **no longer work**:

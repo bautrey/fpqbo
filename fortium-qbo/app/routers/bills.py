@@ -1,13 +1,17 @@
 """Bill endpoints using QBO SDK."""
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
+from quickbooks.exceptions import ValidationException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import verify_api_key
 from app.services.qbo_service import QBOService, get_qbo_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/bills",
@@ -69,6 +73,47 @@ async def create_bill(
     """
     try:
         return await qbo.create_bill(company_id, bill_data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.post("/{bill_id}", response_model=dict[str, Any])
+async def update_bill(
+    bill_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    sparse_payload: dict[str, Any] = Body(
+        ...,
+        description="Sparse update fields (must include SyncToken). "
+                    "Id and sparse:true are injected server-side.",
+    ),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Sparse-update a bill in QBO.
+
+    Performs a sparse update via QBO's
+    ``POST /v3/company/{realm}/bill?operation=update`` endpoint. The server
+    injects ``Id`` and ``sparse: true`` into the payload — the client only
+    needs to supply ``SyncToken`` plus whichever fields it wants to change
+    (``Line``, ``TxnDate``, ``DueDate``, ``PrivateNote``, etc).
+
+    Returns the updated Bill object from QBO.
+
+    Errors:
+    - 409 when QBO reports a SyncToken mismatch (error code 5310)
+    - 500 for other QBO errors
+    """
+    logger.info(f"Updating bill {bill_id} for company_id={company_id}")
+    try:
+        return await qbo.update_bill(company_id, bill_id, sparse_payload)
+    except ValidationException as e:
+        if getattr(e, "error_code", 0) == 5310:
+            raise HTTPException(
+                status_code=409,
+                detail=f"SyncToken mismatch: {e.message}. {e.detail}".strip(),
+            )
+        raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

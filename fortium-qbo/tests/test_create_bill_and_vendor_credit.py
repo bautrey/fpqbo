@@ -588,3 +588,152 @@ def test_delete_invoice_router_enforces_api_key_dependency():
 
     dep_callables = [d.dependency for d in invoices.router.dependencies]
     assert verify_api_key in dep_callables
+
+
+# ---------------------------------------------------------------------------
+# update_bill (sparse update)
+# ---------------------------------------------------------------------------
+
+
+def test_update_bill_success(monkeypatch):
+    """Sparse update posts to /bill?operation=update with Id+sparse injected."""
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1", code="FOR-TEST"))
+
+    captured = {}
+
+    def _fake_post(url, data, params=None):
+        captured["url"] = url
+        captured["data"] = data
+        captured["params"] = params
+        return {
+            "Bill": {
+                "Id": "90458",
+                "SyncToken": "2",
+                "PrivateNote": "Updated memo",
+            }
+        }
+
+    fake_client = SimpleNamespace(
+        api_url="https://quickbooks.api.intuit.com/v3",
+        company_id="9130000000000",
+        post=_fake_post,
+    )
+    monkeypatch.setattr(svc, "_get_client", lambda _co: fake_client)
+
+    sparse_payload = {
+        "SyncToken": "1",
+        "PrivateNote": "Updated memo",
+    }
+    result = _run(svc.update_bill(1, "90458", sparse_payload))
+
+    # URL is /v3/company/{realm}/bill
+    assert captured["url"] == "https://quickbooks.api.intuit.com/v3/company/9130000000000/bill"
+    # Operation=update (minorversion is added by the SDK, not by us)
+    assert captured["params"] == {"operation": "update"}
+
+    # Body has Id and sparse:true injected, plus the client's fields
+    import json
+    body = json.loads(captured["data"])
+    assert body["Id"] == "90458"
+    assert body["sparse"] is True
+    assert body["SyncToken"] == "1"
+    assert body["PrivateNote"] == "Updated memo"
+
+    # Result is the updated Bill (rebuilt by Bill.from_json, then to_dict)
+    assert result["Id"] == "90458"
+
+
+def test_update_bill_does_not_mutate_caller_payload(monkeypatch):
+    """Ensure we don't add Id/sparse onto the caller's dict in place."""
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1", code="FOR-TEST"))
+
+    fake_client = SimpleNamespace(
+        api_url="https://quickbooks.api.intuit.com/v3",
+        company_id="9130000000000",
+        post=lambda url, data, params=None: {"Bill": {"Id": "90458"}},
+    )
+    monkeypatch.setattr(svc, "_get_client", lambda _co: fake_client)
+
+    sparse_payload = {"SyncToken": "1", "PrivateNote": "x"}
+    _run(svc.update_bill(1, "90458", sparse_payload))
+
+    assert "Id" not in sparse_payload
+    assert "sparse" not in sparse_payload
+
+
+def test_update_bill_synctoken_mismatch_raises_409(monkeypatch):
+    """QBO code 5310 -> router translates to HTTP 409."""
+    from fastapi import HTTPException
+    from quickbooks.exceptions import ValidationException
+
+    from app.routers import bills as bills_router
+
+    async def _fake_update(company_id, bill_id, sparse_payload):
+        raise ValidationException(
+            "Stale Object Error",
+            error_code=5310,
+            detail="Stale object detected. Object: Bill, Id=90458, supplied SyncToken=0",
+        )
+
+    fake_svc = SimpleNamespace(update_bill=_fake_update)
+
+    with pytest.raises(HTTPException) as exc_info:
+        _run(bills_router.update_bill(
+            bill_id=90458,
+            company_id=1,
+            sparse_payload={"SyncToken": "0", "PrivateNote": "x"},
+            qbo=fake_svc,
+        ))
+
+    assert exc_info.value.status_code == 409
+    assert "SyncToken mismatch" in exc_info.value.detail
+    assert "Stale Object Error" in exc_info.value.detail
+
+
+def test_update_bill_other_validation_error_raises_400(monkeypatch):
+    """Non-5310 ValidationException -> 400, not 409."""
+    from fastapi import HTTPException
+    from quickbooks.exceptions import ValidationException
+
+    from app.routers import bills as bills_router
+
+    async def _fake_update(company_id, bill_id, sparse_payload):
+        raise ValidationException(
+            "Required field missing",
+            error_code=2010,
+            detail="Required param missing",
+        )
+
+    fake_svc = SimpleNamespace(update_bill=_fake_update)
+
+    with pytest.raises(HTTPException) as exc_info:
+        _run(bills_router.update_bill(
+            bill_id=90458,
+            company_id=1,
+            sparse_payload={"SyncToken": "1"},
+            qbo=fake_svc,
+        ))
+
+    assert exc_info.value.status_code == 400
+
+
+def test_update_bill_router_has_post_route():
+    from app.routers import bills
+
+    methods_paths = {
+        (frozenset(r.methods), r.path)
+        for r in bills.router.routes
+        if hasattr(r, "methods")
+    }
+    assert (frozenset({"POST"}), "/bills/{bill_id}") in methods_paths
+
+
+def test_update_bill_router_enforces_api_key_dependency():
+    """The router-level dependency covers all bills routes including update."""
+    from app.dependencies import verify_api_key
+    from app.routers import bills
+
+    dep_callables = [d.dependency for d in bills.router.dependencies]
+    assert verify_api_key in dep_callables
