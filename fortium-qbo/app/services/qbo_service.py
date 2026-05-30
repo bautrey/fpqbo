@@ -6,9 +6,15 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
+import requests.exceptions as requests_exceptions
 from intuitlib.client import AuthClient
 from intuitlib.enums import Scopes
 from quickbooks import QuickBooks
+from quickbooks.exceptions import (
+    QuickbooksException,
+    SevereException,
+    UnsupportedException,
+)
 from quickbooks.objects.account import Account
 from quickbooks.objects.attachable import Attachable
 from quickbooks.objects.bill import Bill
@@ -65,6 +71,51 @@ QBO_MINOR_VERSION = 69
 
 # Token refresh buffer - refresh if expiring within this time
 TOKEN_REFRESH_BUFFER = timedelta(minutes=5)
+
+# Bounded retry for transient QBO faults (e.g. the intermittent
+# "QB Severe Exception 10000" 500s QBO returns on entity reads).
+# 1 initial attempt + 2 retries, backing off 1s then 2s.
+QBO_RETRY_ATTEMPTS = 3
+QBO_RETRY_BACKOFF_SECONDS = (1, 2)
+
+# Raw transport-level errors that indicate a transient network blip rather
+# than a deterministic client error. The SDK transports over `requests`
+# (OAuth2Session), so these surface unwrapped; httpx errors are included for
+# the direct-API report paths.
+_TRANSIENT_NETWORK_ERRORS = (
+    requests_exceptions.ConnectionError,
+    requests_exceptions.Timeout,
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+    httpx.ConnectTimeout,
+)
+
+
+def _is_transient_qbo_error(exc: Exception) -> bool:
+    """Return True if `exc` is a transient QBO/network fault worth retrying.
+
+    Transient (retry):
+      - SevereException (QBO error_code >= 10000 — the "Severe Exception 10000")
+      - UnsupportedException (QBO error_code 500-599)
+      - Any QuickbooksException whose error_code is a 5xx HTTP status or
+        >= 10000 (covers the SDK's bare `QuickbooksException(..., 10000)` raised
+        on unparseable / non-OK responses in client.make_request)
+      - Raw network connect/read timeouts
+
+    Deterministic (do NOT retry — must surface immediately):
+      - AuthorizationException (1-499, incl. HTTP 401), ValidationException
+        (2000-4999), ObjectNotFoundException (610), other GeneralException,
+        ValueError. None of these subclasses match the checks below.
+    """
+    if isinstance(exc, _TRANSIENT_NETWORK_ERRORS):
+        return True
+    if isinstance(exc, (SevereException, UnsupportedException)):
+        return True
+    if isinstance(exc, QuickbooksException):
+        code = exc.error_code
+        if isinstance(code, int) and (code >= 10000 or 500 <= code <= 599):
+            return True
+    return False
 
 
 class QBOService:
@@ -217,6 +268,54 @@ class QBOService:
         return self._clients[cache_key]
 
     # -------------------------------------------------------------------------
+    # Transient-fault retry
+    # -------------------------------------------------------------------------
+
+    async def _to_thread_with_retry(self, fn, *, op: str):
+        """Run a blocking SDK call in a thread, retrying transient QBO faults.
+
+        Used by READ paths only. Retries up to QBO_RETRY_ATTEMPTS times
+        (1 + 2) on transient faults (see `_is_transient_qbo_error`), backing
+        off per QBO_RETRY_BACKOFF_SECONDS. Deterministic faults (auth,
+        validation, not-found, ValueError) raise immediately. If retries are
+        exhausted the original exception is re-raised — a persistent QBO
+        outage is never masked as an empty/success result.
+
+        Must NOT be used on mutation/create paths: retrying a non-idempotent
+        write could double-post to QBO.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, QBO_RETRY_ATTEMPTS + 1):
+            try:
+                return await asyncio.to_thread(fn)
+            except Exception as exc:
+                if not _is_transient_qbo_error(exc):
+                    raise
+                last_exc = exc
+                if attempt == QBO_RETRY_ATTEMPTS:
+                    logger.warning(
+                        "QBO transient fault on %s: exhausted %d attempts, "
+                        "re-raising: %s",
+                        op,
+                        QBO_RETRY_ATTEMPTS,
+                        exc,
+                    )
+                    raise
+                backoff = QBO_RETRY_BACKOFF_SECONDS[attempt - 1]
+                logger.warning(
+                    "QBO transient fault on %s (attempt %d/%d), retrying in "
+                    "%ds: %s",
+                    op,
+                    attempt,
+                    QBO_RETRY_ATTEMPTS,
+                    backoff,
+                    exc,
+                )
+                await asyncio.sleep(backoff)
+        # Unreachable: loop either returns or raises. Guard for type-checkers.
+        raise last_exc  # type: ignore[misc]
+
+    # -------------------------------------------------------------------------
     # Entity Methods (async via to_thread)
     # -------------------------------------------------------------------------
 
@@ -241,7 +340,7 @@ class QBOService:
                 )
             return Invoice.all(max_results=max_results, qb=client)
 
-        invoices = await asyncio.to_thread(_fetch)
+        invoices = await self._to_thread_with_retry(_fetch, op="get_invoices")
         return [inv.to_dict() for inv in invoices]
 
     async def get_invoice_by_id(
@@ -254,7 +353,7 @@ class QBOService:
         def _fetch():
             return Invoice.get(invoice_id, qb=client)
 
-        invoice = await asyncio.to_thread(_fetch)
+        invoice = await self._to_thread_with_retry(_fetch, op="get_invoice_by_id")
         return invoice.to_dict() if invoice else None
 
     async def get_invoice_by_doc_number(
@@ -268,7 +367,7 @@ class QBOService:
             results = Invoice.where(f"DocNumber = '{doc_number}'", qb=client)
             return results[0] if results else None
 
-        invoice = await asyncio.to_thread(_fetch)
+        invoice = await self._to_thread_with_retry(_fetch, op="get_invoice_by_doc_number")
         return invoice.to_dict() if invoice else None
 
     async def get_customers(
@@ -283,7 +382,7 @@ class QBOService:
                 return Customer.filter(Active=True, max_results=max_results, qb=client)
             return Customer.all(max_results=max_results, qb=client)
 
-        customers = await asyncio.to_thread(_fetch)
+        customers = await self._to_thread_with_retry(_fetch, op="get_customers")
         return [c.to_dict() for c in customers]
 
     async def get_customer_by_id(
@@ -296,7 +395,7 @@ class QBOService:
         def _fetch():
             return Customer.get(customer_id, qb=client)
 
-        customer = await asyncio.to_thread(_fetch)
+        customer = await self._to_thread_with_retry(_fetch, op="get_customer_by_id")
         return customer.to_dict() if customer else None
 
     async def get_vendors(
@@ -311,7 +410,7 @@ class QBOService:
                 return Vendor.filter(Active=True, max_results=max_results, qb=client)
             return Vendor.all(max_results=max_results, qb=client)
 
-        vendors = await asyncio.to_thread(_fetch)
+        vendors = await self._to_thread_with_retry(_fetch, op="get_vendors")
         return [v.to_dict() for v in vendors]
 
     async def get_vendor_by_id(
@@ -324,7 +423,7 @@ class QBOService:
         def _fetch():
             return Vendor.get(vendor_id, qb=client)
 
-        vendor = await asyncio.to_thread(_fetch)
+        vendor = await self._to_thread_with_retry(_fetch, op="get_vendor_by_id")
         return vendor.to_dict() if vendor else None
 
     async def create_customer(
@@ -478,7 +577,7 @@ class QBOService:
                 return Account.filter(Active=True, max_results=max_results, qb=client)
             return Account.all(max_results=max_results, qb=client)
 
-        accounts = await asyncio.to_thread(_fetch)
+        accounts = await self._to_thread_with_retry(_fetch, op="get_accounts")
         return [a.to_dict() for a in accounts]
 
     async def get_account_by_id(
@@ -491,7 +590,7 @@ class QBOService:
         def _fetch():
             return Account.get(account_id, qb=client)
 
-        account = await asyncio.to_thread(_fetch)
+        account = await self._to_thread_with_retry(_fetch, op="get_account_by_id")
         return account.to_dict() if account else None
 
     async def get_account_by_number(
@@ -505,7 +604,7 @@ class QBOService:
             results = Account.where(f"AcctNum = '{account_number}'", qb=client)
             return results[0] if results else None
 
-        account = await asyncio.to_thread(_fetch)
+        account = await self._to_thread_with_retry(_fetch, op="get_account_by_number")
         return account.to_dict() if account else None
 
     async def get_bills(
@@ -518,7 +617,7 @@ class QBOService:
         def _fetch():
             return Bill.all(max_results=max_results, qb=client)
 
-        bills = await asyncio.to_thread(_fetch)
+        bills = await self._to_thread_with_retry(_fetch, op="get_bills")
         return [b.to_dict() for b in bills]
 
     async def get_bill_by_id(
@@ -531,7 +630,7 @@ class QBOService:
         def _fetch():
             return Bill.get(bill_id, qb=client)
 
-        bill = await asyncio.to_thread(_fetch)
+        bill = await self._to_thread_with_retry(_fetch, op="get_bill_by_id")
         return bill.to_dict() if bill else None
 
     async def delete_bill(
@@ -709,7 +808,7 @@ class QBOService:
                 )
             return Payment.all(max_results=max_results, qb=client)
 
-        payments = await asyncio.to_thread(_fetch)
+        payments = await self._to_thread_with_retry(_fetch, op="get_payments")
         return [p.to_dict() for p in payments]
 
     async def get_payment_by_id(
@@ -722,7 +821,7 @@ class QBOService:
         def _fetch():
             return Payment.get(payment_id, qb=client)
 
-        payment = await asyncio.to_thread(_fetch)
+        payment = await self._to_thread_with_retry(_fetch, op="get_payment_by_id")
         return payment.to_dict() if payment else None
 
     # -------------------------------------------------------------------------
@@ -738,7 +837,7 @@ class QBOService:
         def _fetch():
             return BillPayment.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_bill_payments")
         return [i.to_dict() for i in items]
 
     async def get_bill_payment_by_id(
@@ -750,7 +849,7 @@ class QBOService:
         def _fetch():
             return BillPayment.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_bill_payment_by_id")
         return result.to_dict() if result else None
 
     async def get_bill_payments_by_bill_id(
@@ -779,7 +878,7 @@ class QBOService:
                     break
             return matched
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_bill_payments_by_bill_id")
         return [i.to_dict() for i in items]
 
     async def create_bill_payment(
@@ -860,7 +959,7 @@ class QBOService:
         def _fetch():
             return CreditMemo.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_credit_memos")
         return [i.to_dict() for i in items]
 
     async def get_credit_memo_by_id(
@@ -872,7 +971,7 @@ class QBOService:
         def _fetch():
             return CreditMemo.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_credit_memo_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -888,7 +987,7 @@ class QBOService:
         def _fetch():
             return Deposit.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_deposits")
         return [i.to_dict() for i in items]
 
     async def get_deposit_by_id(
@@ -900,7 +999,7 @@ class QBOService:
         def _fetch():
             return Deposit.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_deposit_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -916,7 +1015,7 @@ class QBOService:
         def _fetch():
             return Estimate.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_estimates")
         return [i.to_dict() for i in items]
 
     async def get_estimate_by_id(
@@ -928,7 +1027,7 @@ class QBOService:
         def _fetch():
             return Estimate.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_estimate_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -944,7 +1043,7 @@ class QBOService:
         def _fetch():
             return JournalEntry.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_journal_entries")
         return [i.to_dict() for i in items]
 
     async def get_journal_entry_by_id(
@@ -956,7 +1055,7 @@ class QBOService:
         def _fetch():
             return JournalEntry.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_journal_entry_by_id")
         return result.to_dict() if result else None
 
     async def create_journal_entry(
@@ -1105,7 +1204,7 @@ class QBOService:
         def _fetch():
             return Purchase.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_purchases")
         return [i.to_dict() for i in items]
 
     async def get_purchase_by_id(
@@ -1117,7 +1216,7 @@ class QBOService:
         def _fetch():
             return Purchase.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_purchase_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1133,7 +1232,7 @@ class QBOService:
         def _fetch():
             return PurchaseOrder.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_purchase_orders")
         return [i.to_dict() for i in items]
 
     async def get_purchase_order_by_id(
@@ -1145,7 +1244,7 @@ class QBOService:
         def _fetch():
             return PurchaseOrder.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_purchase_order_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1161,7 +1260,7 @@ class QBOService:
         def _fetch():
             return RefundReceipt.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_refund_receipts")
         return [i.to_dict() for i in items]
 
     async def get_refund_receipt_by_id(
@@ -1173,7 +1272,7 @@ class QBOService:
         def _fetch():
             return RefundReceipt.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_refund_receipt_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1189,7 +1288,7 @@ class QBOService:
         def _fetch():
             return SalesReceipt.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_sales_receipts")
         return [i.to_dict() for i in items]
 
     async def get_sales_receipt_by_id(
@@ -1201,7 +1300,7 @@ class QBOService:
         def _fetch():
             return SalesReceipt.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_sales_receipt_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1217,7 +1316,7 @@ class QBOService:
         def _fetch():
             return Transfer.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_transfers")
         return [i.to_dict() for i in items]
 
     async def get_transfer_by_id(
@@ -1229,7 +1328,7 @@ class QBOService:
         def _fetch():
             return Transfer.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_transfer_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1245,7 +1344,7 @@ class QBOService:
         def _fetch():
             return VendorCredit.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_vendor_credits")
         return [i.to_dict() for i in items]
 
     async def get_vendor_credit_by_id(
@@ -1257,7 +1356,7 @@ class QBOService:
         def _fetch():
             return VendorCredit.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_vendor_credit_by_id")
         return result.to_dict() if result else None
 
     async def create_vendor_credit(
@@ -1337,7 +1436,7 @@ class QBOService:
                 return Item.filter(Active=True, max_results=max_results, qb=client)
             return Item.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_items")
         return [i.to_dict() for i in items]
 
     async def get_item_by_id(
@@ -1349,7 +1448,7 @@ class QBOService:
         def _fetch():
             return Item.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_item_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1367,7 +1466,7 @@ class QBOService:
                 return Employee.filter(Active=True, max_results=max_results, qb=client)
             return Employee.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_employees")
         return [i.to_dict() for i in items]
 
     async def get_employee_by_id(
@@ -1379,7 +1478,7 @@ class QBOService:
         def _fetch():
             return Employee.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_employee_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1397,7 +1496,7 @@ class QBOService:
                 return Department.filter(Active=True, max_results=max_results, qb=client)
             return Department.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_departments")
         return [i.to_dict() for i in items]
 
     async def get_department_by_id(
@@ -1409,7 +1508,7 @@ class QBOService:
         def _fetch():
             return Department.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_department_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1425,7 +1524,7 @@ class QBOService:
         def _fetch():
             return TimeActivity.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_time_activities")
         return [i.to_dict() for i in items]
 
     async def get_time_activity_by_id(
@@ -1437,7 +1536,7 @@ class QBOService:
         def _fetch():
             return TimeActivity.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_time_activity_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1454,7 +1553,7 @@ class QBOService:
             results = CompanyInfo.all(max_results=1, qb=client)
             return results[0] if results else None
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_company_info")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1470,7 +1569,7 @@ class QBOService:
         def _fetch():
             return Preferences.get(qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_preferences")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1486,7 +1585,7 @@ class QBOService:
         def _fetch():
             return TaxAgency.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_tax_agencies")
         return [i.to_dict() for i in items]
 
     async def get_tax_agency_by_id(
@@ -1498,7 +1597,7 @@ class QBOService:
         def _fetch():
             return TaxAgency.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_tax_agency_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1514,7 +1613,7 @@ class QBOService:
         def _fetch():
             return TaxCode.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_tax_codes")
         return [i.to_dict() for i in items]
 
     async def get_tax_code_by_id(
@@ -1526,7 +1625,7 @@ class QBOService:
         def _fetch():
             return TaxCode.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_tax_code_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1542,7 +1641,7 @@ class QBOService:
         def _fetch():
             return TaxRate.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_tax_rates")
         return [i.to_dict() for i in items]
 
     async def get_tax_rate_by_id(
@@ -1554,7 +1653,7 @@ class QBOService:
         def _fetch():
             return TaxRate.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_tax_rate_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1570,7 +1669,7 @@ class QBOService:
         def _fetch():
             return CompanyCurrency.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_company_currencies")
         return [i.to_dict() for i in items]
 
     async def get_company_currency_by_id(
@@ -1582,7 +1681,7 @@ class QBOService:
         def _fetch():
             return CompanyCurrency.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_company_currency_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1598,7 +1697,7 @@ class QBOService:
         def _fetch():
             return ExchangeRate.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_exchange_rates")
         return [i.to_dict() for i in items]
 
     # -------------------------------------------------------------------------
@@ -1616,7 +1715,7 @@ class QBOService:
                 return PaymentMethod.filter(Active=True, max_results=max_results, qb=client)
             return PaymentMethod.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_payment_methods")
         return [i.to_dict() for i in items]
 
     async def get_payment_method_by_id(
@@ -1628,7 +1727,7 @@ class QBOService:
         def _fetch():
             return PaymentMethod.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_payment_method_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1646,7 +1745,7 @@ class QBOService:
                 return Term.filter(Active=True, max_results=max_results, qb=client)
             return Term.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_terms")
         return [i.to_dict() for i in items]
 
     async def get_term_by_id(
@@ -1658,7 +1757,7 @@ class QBOService:
         def _fetch():
             return Term.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_term_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1676,7 +1775,7 @@ class QBOService:
                 return TrackingClass.filter(Active=True, max_results=max_results, qb=client)
             return TrackingClass.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_classes")
         return [i.to_dict() for i in items]
 
     async def get_class_by_id(
@@ -1688,7 +1787,7 @@ class QBOService:
         def _fetch():
             return TrackingClass.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_class_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1704,7 +1803,7 @@ class QBOService:
         def _fetch():
             return CustomerType.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_customer_types")
         return [i.to_dict() for i in items]
 
     async def get_customer_type_by_id(
@@ -1716,7 +1815,7 @@ class QBOService:
         def _fetch():
             return CustomerType.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_customer_type_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1732,7 +1831,7 @@ class QBOService:
         def _fetch():
             return Attachable.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_attachables")
         return [i.to_dict() for i in items]
 
     async def get_attachable_by_id(
@@ -1744,7 +1843,7 @@ class QBOService:
         def _fetch():
             return Attachable.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_attachable_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
@@ -1760,7 +1859,7 @@ class QBOService:
         def _fetch():
             return RecurringTransaction.all(max_results=max_results, qb=client)
 
-        items = await asyncio.to_thread(_fetch)
+        items = await self._to_thread_with_retry(_fetch, op="get_recurring_transactions")
         return [i.to_dict() for i in items]
 
     async def get_recurring_transaction_by_id(
@@ -1772,7 +1871,7 @@ class QBOService:
         def _fetch():
             return RecurringTransaction.get(entity_id, qb=client)
 
-        result = await asyncio.to_thread(_fetch)
+        result = await self._to_thread_with_retry(_fetch, op="get_recurring_transaction_by_id")
         return result.to_dict() if result else None
 
     # -------------------------------------------------------------------------
