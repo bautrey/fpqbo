@@ -23,3 +23,7 @@ intuit-oauth>=1.2.0
 # HTTP clients
 httpx>=0.26.0
 authlib>=1.3.0
+# requests is pulled in transitively by python-quickbooks; declared directly
+# because qbo_service imports requests.exceptions to classify raw network
+# (connect/read-timeout) errors for transient-retry.
+requests>=2.31.0
