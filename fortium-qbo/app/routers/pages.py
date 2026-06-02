@@ -32,7 +32,7 @@ async def login_page(request: Request):
     Returns:
         HTML login page template
     """
-    return templates.TemplateResponse("login.html", {"request": request})
+    return templates.TemplateResponse(request, "login.html")
 
 
 @router.get("/")
@@ -75,9 +75,9 @@ async def home_page(request: Request):
 
         # Render home page with user context
         return templates.TemplateResponse(
+            request,
             "home.html",
             {
-                "request": request,
                 "user": admin_user,
             }
         )
@@ -142,9 +142,9 @@ async def companies_page(request: Request, message: str | None = None):
 
         # Render companies page
         return templates.TemplateResponse(
+            request,
             "admin/companies.html",
             {
-                "request": request,
                 "user": admin_user,
                 "companies": companies,
                 "message": message,
@@ -206,9 +206,9 @@ async def api_keys_page(request: Request, message: str | None = None):
 
         # Render API keys page
         return templates.TemplateResponse(
+            request,
             "admin/api_keys.html",
             {
-                "request": request,
                 "user": admin_user,
                 "companies": companies,
                 "api_keys": api_keys,
