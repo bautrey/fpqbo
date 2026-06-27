@@ -6,7 +6,7 @@
 ## Architecture
 
 The `fortium-qbo/` directory contains a FastAPI service deployed at **https://qbo-oauth.onrender.com** that:
-- Manages OAuth2 tokens for multiple QBO companies in a Supabase PostgreSQL database
+- Manages OAuth2 tokens for multiple QBO companies in a Render PostgreSQL database (the `fpqbo` database on the shared `fortium-render-production-postgres` cluster, instance `dpg-d5dcfmqli9vc73dfrfvg-a`, Oregon). Migrated off Supabase on 2026-05-22.
 - Auto-refreshes tokens via a background scheduler (every 45 minutes)
 - Exposes a REST API for QBO data access (invoices, accounts, vendors, etc.)
 - Provides an admin UI for managing connected companies (Google OAuth login)
@@ -16,6 +16,8 @@ The `fortium-qbo/` directory contains a FastAPI service deployed at **https://qb
 |------|---------|--------|
 | FOR-138 | Fortium Partners, LP. | US |
 | FOR-971 | Fortium Partners Canada LP | CA |
+| FOR-336 | Fortium Partners GP, LLC | US |
+| AUT-691 | Autrey Investments LLC | US |
 
 ### IMPORTANT: Token Management
 - **DO NOT** use the root `.env` file for QBO access — those credentials are from a deprecated Intuit app
@@ -31,6 +33,12 @@ security find-generic-password -a "burkestudio" -s "fpqbo-api-key-us" -w
 
 # Canada company (FOR-971)
 security find-generic-password -a "burkestudio" -s "fpqbo-api-key-ca" -w
+
+# Fortium Partners GP, LLC (FOR-336)
+security find-generic-password -a "burkestudio" -s "fpqbo-api-key-for336" -w
+
+# Autrey Investments LLC (AUT-691)
+security find-generic-password -a "burkestudio" -s "fpqbo-api-key-aut691" -w
 ```
 
 **Usage:**
