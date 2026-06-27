@@ -6,11 +6,12 @@ raises/returns) and patch asyncio.sleep to keep the test instant.
 """
 
 import asyncio
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
-from app.services import qbo_service as qbo_service_module
-from app.services.qbo_service import QBOService
+from app.services.qbo_service import QBOService, _is_transient_qbo_error
 from quickbooks.exceptions import (
     AuthorizationException,
     SevereException,
@@ -143,3 +144,105 @@ def test_severe_exception_every_time_reraises_after_three_attempts(monkeypatch):
     assert excinfo.value is exc, "must re-raise the original exception, not a wrapper"
     assert fn.calls == 3, "expected exactly 3 attempts before giving up"
     assert sleeps == [1, 2], "expected backoff after attempts 1 and 2 only"
+
+
+# ---------------------------------------------------------------------------
+# Report path (direct httpx API) transient-fault coverage
+# ---------------------------------------------------------------------------
+
+
+def _httpx_status_error(status: int) -> httpx.HTTPStatusError:
+    req = httpx.Request("GET", "https://sandbox-quickbooks.api.intuit.com/x")
+    resp = httpx.Response(status, request=req)
+    return httpx.HTTPStatusError(f"HTTP {status}", request=req, response=resp)
+
+
+def test_is_transient_classifies_httpx_5xx_but_not_4xx():
+    """Report 5xx (httpx.HTTPStatusError) is transient; 4xx is deterministic."""
+    assert _is_transient_qbo_error(_httpx_status_error(503)) is True
+    assert _is_transient_qbo_error(_httpx_status_error(500)) is True
+    assert _is_transient_qbo_error(_httpx_status_error(404)) is False
+    assert _is_transient_qbo_error(_httpx_status_error(400)) is False
+
+
+class _ScriptedResponse:
+    """Minimal stand-in for httpx.Response with scripted status/payload."""
+
+    def __init__(self, status: int, payload=None):
+        self.status_code = status
+        self._payload = payload or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise _httpx_status_error(self.status_code)
+
+    def json(self):
+        return self._payload
+
+
+def _patch_async_client(monkeypatch, scripted, state):
+    """Patch httpx.AsyncClient so successive .get() calls return scripted[i]."""
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            resp = scripted[state["i"]]
+            state["i"] += 1
+            return resp
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+
+def test_fetch_report_retries_transient_5xx_then_succeeds(monkeypatch):
+    """A report 5xx is retried; the next-attempt 200 payload is returned."""
+    svc = _make_service()
+    monkeypatch.setattr(QBOService, "_needs_refresh", lambda self, c: False)
+
+    state = {"i": 0}
+    _patch_async_client(
+        monkeypatch,
+        [_ScriptedResponse(503), _ScriptedResponse(200, {"Rows": "ok"})],
+        state,
+    )
+
+    sleeps = []
+
+    async def _fake_sleep(secs):
+        sleeps.append(secs)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+    company = SimpleNamespace(is_sandbox=False, realm_id="123", access_token="tok")
+    result = _run(svc._fetch_report(company, "TrialBalance", {}))
+
+    assert result == {"Rows": "ok"}
+    assert state["i"] == 2, "expected one retry (2 GETs)"
+    assert sleeps == [1], "expected a single 1s backoff before the retry"
+
+
+def test_fetch_report_4xx_raises_immediately_no_retry(monkeypatch):
+    """A report 4xx is deterministic — surface immediately, no retry."""
+    svc = _make_service()
+    monkeypatch.setattr(QBOService, "_needs_refresh", lambda self, c: False)
+
+    state = {"i": 0}
+    _patch_async_client(monkeypatch, [_ScriptedResponse(400)], state)
+
+    async def _fake_sleep(secs):  # pragma: no cover - must never be called
+        raise AssertionError("sleep should not be called for a report 4xx")
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+    company = SimpleNamespace(is_sandbox=False, realm_id="123", access_token="tok")
+    with pytest.raises(httpx.HTTPStatusError):
+        _run(svc._fetch_report(company, "TrialBalance", {}))
+
+    assert state["i"] == 1, "deterministic report 4xx must not be retried"

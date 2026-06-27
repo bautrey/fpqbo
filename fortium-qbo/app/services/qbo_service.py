@@ -80,8 +80,10 @@ QBO_RETRY_BACKOFF_SECONDS = (1, 2)
 
 # Raw transport-level errors that indicate a transient network blip rather
 # than a deterministic client error. The SDK transports over `requests`
-# (OAuth2Session), so these surface unwrapped; httpx errors are included for
-# the direct-API report paths.
+# (OAuth2Session), so requests errors surface unwrapped; the httpx errors
+# cover the direct-API report path (_fetch_report), which is retried via
+# _with_retry. Report HTTP 5xx surfaces as httpx.HTTPStatusError and is
+# classified transient in _is_transient_qbo_error below.
 _TRANSIENT_NETWORK_ERRORS = (
     requests_exceptions.ConnectionError,
     requests_exceptions.Timeout,
@@ -101,14 +103,21 @@ def _is_transient_qbo_error(exc: Exception) -> bool:
         >= 10000 (covers the SDK's bare `QuickbooksException(..., 10000)` raised
         on unparseable / non-OK responses in client.make_request)
       - Raw network connect/read timeouts
+      - Direct-API report 5xx (httpx.HTTPStatusError with a 500-599 status,
+        raised by response.raise_for_status() in _fetch_report)
 
     Deterministic (do NOT retry — must surface immediately):
       - AuthorizationException (1-499, incl. HTTP 401), ValidationException
         (2000-4999), ObjectNotFoundException (610), other GeneralException,
-        ValueError. None of these subclasses match the checks below.
+        ValueError, and report 4xx (httpx.HTTPStatusError < 500). None of
+        these match the checks below.
     """
     if isinstance(exc, _TRANSIENT_NETWORK_ERRORS):
         return True
+    # Direct-API report path: a 5xx surfaces as httpx.HTTPStatusError via
+    # response.raise_for_status(); retry 5xx, but not deterministic 4xx.
+    if isinstance(exc, httpx.HTTPStatusError):
+        return 500 <= exc.response.status_code <= 599
     if isinstance(exc, (SevereException, UnsupportedException)):
         return True
     if isinstance(exc, QuickbooksException):
@@ -278,15 +287,15 @@ class QBOService:
     # Transient-fault retry
     # -------------------------------------------------------------------------
 
-    async def _to_thread_with_retry(self, fn, *, op: str):
-        """Run a blocking SDK call in a thread, retrying transient QBO faults.
+    async def _with_retry(self, operation, *, op: str):
+        """Await ``operation()`` (an async callable) with transient-fault retry.
 
-        Used by READ paths only. Retries up to QBO_RETRY_ATTEMPTS times
-        (1 + 2) on transient faults (see `_is_transient_qbo_error`), backing
-        off per QBO_RETRY_BACKOFF_SECONDS. Deterministic faults (auth,
-        validation, not-found, ValueError) raise immediately. If retries are
-        exhausted the original exception is re-raised — a persistent QBO
-        outage is never masked as an empty/success result.
+        Shared retry driver for READ paths. Retries up to QBO_RETRY_ATTEMPTS
+        times (1 + 2) on transient faults (see `_is_transient_qbo_error`),
+        backing off per QBO_RETRY_BACKOFF_SECONDS. Deterministic faults (auth,
+        validation, not-found, ValueError, report 4xx) raise immediately. If
+        retries are exhausted the original exception is re-raised — a
+        persistent QBO outage is never masked as an empty/success result.
 
         Must NOT be used on mutation/create paths: retrying a non-idempotent
         write could double-post to QBO.
@@ -294,7 +303,7 @@ class QBOService:
         last_exc: Exception | None = None
         for attempt in range(1, QBO_RETRY_ATTEMPTS + 1):
             try:
-                return await asyncio.to_thread(fn)
+                return await operation()
             except Exception as exc:
                 if not _is_transient_qbo_error(exc):
                     raise
@@ -321,6 +330,16 @@ class QBOService:
                 await asyncio.sleep(backoff)
         # Unreachable: loop either returns or raises. Guard for type-checkers.
         raise last_exc  # type: ignore[misc]
+
+    async def _to_thread_with_retry(self, fn, *, op: str):
+        """Run a blocking SDK call in a thread, retrying transient QBO faults.
+
+        Thin wrapper over `_with_retry` for the SDK read methods: runs the
+        blocking `fn` via asyncio.to_thread on each attempt. See `_with_retry`
+        for retry/backoff/re-raise semantics. READ paths only — never wrap a
+        non-idempotent mutation (double-post risk).
+        """
+        return await self._with_retry(lambda: asyncio.to_thread(fn), op=op)
 
     # -------------------------------------------------------------------------
     # Entity Methods (async via to_thread)
@@ -1888,7 +1907,13 @@ class QBOService:
     async def _fetch_report(
         self, company: QboCompany, report_name: str, params: dict[str, str]
     ) -> dict[str, Any]:
-        """Fetch a QBO report via direct API call."""
+        """Fetch a QBO report via direct API call, retrying transient faults.
+
+        Reports are read-only GETs, so they get the same bounded transient-
+        fault retry as the SDK read paths (via `_with_retry`): connect/read
+        timeouts and report 5xx (httpx.HTTPStatusError) are retried, while 4xx
+        and other deterministic faults surface immediately.
+        """
         # Ensure token is fresh
         if self._needs_refresh(company):
             self._refresh_token(company)
@@ -1901,17 +1926,20 @@ class QBOService:
         url = f"{base_url}/v3/company/{company.realm_id}/reports/{report_name}"
         params["minorversion"] = str(QBO_MINOR_VERSION)
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                url,
-                params=params,
-                headers={
-                    "Authorization": f"Bearer {company.access_token}",
-                    "Accept": "application/json",
-                },
-            )
-            response.raise_for_status()
-            return response.json()
+        async def _do() -> dict[str, Any]:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    url,
+                    params=params,
+                    headers={
+                        "Authorization": f"Bearer {company.access_token}",
+                        "Accept": "application/json",
+                    },
+                )
+                response.raise_for_status()
+                return response.json()
+
+        return await self._with_retry(_do, op=f"report:{report_name}")
 
     async def get_trial_balance(
         self,
