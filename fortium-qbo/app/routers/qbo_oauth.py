@@ -62,27 +62,31 @@ def _get_intuit_auth_client(
     region: str = "US",
     access_token: str | None = None,
     refresh_token: str | None = None,
+    is_sandbox: bool = False,
 ) -> AuthClient | None:
     """
-    Create Intuit AuthClient with credentials for the specified region.
+    Create Intuit AuthClient with credentials for the specified region/environment.
 
     Args:
         region: "US" or "CA"
         access_token: Optional existing access token
         refresh_token: Optional existing refresh token
+        is_sandbox: When True, use Development keys + Intuit's sandbox environment
 
     Returns:
-        AuthClient configured for the region, or None if region not configured
+        AuthClient configured for the region/environment, or None if not configured
     """
-    credentials = settings.get_qbo_credentials(region)
+    credentials = settings.get_qbo_credentials(region, is_sandbox=is_sandbox)
     if not credentials:
-        logger.error(f"QBO credentials not configured for region: {region}")
+        env_label = "sandbox" if is_sandbox else region
+        logger.error(f"QBO credentials not configured for: {env_label}")
         return None
 
     client_id, client_secret = credentials
 
-    # Both US and Canada now use production environment
-    environment = "production"
+    # Sandbox uses Intuit's "sandbox" environment (Development keys); production
+    # companies (US and Canada) use "production".
+    environment = "sandbox" if is_sandbox else "production"
 
     return AuthClient(
         client_id=client_id,
@@ -160,9 +164,16 @@ def _generate_company_code(db, company_name: str) -> str:
     return f"{prefix}-{suffix}"
 
 
-async def _fetch_company_name(realm_id: str, access_token: str) -> str:
+async def _fetch_company_name(
+    realm_id: str, access_token: str, is_sandbox: bool = False
+) -> str:
     """Fetch company name from QBO Company Info API."""
-    url = f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/companyinfo/{realm_id}"
+    base_url = (
+        "https://sandbox-quickbooks.api.intuit.com"
+        if is_sandbox
+        else "https://quickbooks.api.intuit.com"
+    )
+    url = f"{base_url}/v3/company/{realm_id}/companyinfo/{realm_id}"
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -183,18 +194,20 @@ async def _fetch_company_name(realm_id: str, access_token: str) -> str:
 
 
 @router.get("/api/qbo/connect")
-async def qbo_connect(request: Request, region: str = "US"):
+async def qbo_connect(request: Request, region: str = "US", sandbox: bool = False):
     """
     Initiate QBO OAuth flow.
 
     1. Verify admin authentication
-    2. Validate region parameter
+    2. Validate region/environment parameters
     3. Generate state parameter for CSRF protection
-    4. Store state and region in session
+    4. Store state, region, and environment in session
     5. Redirect to Intuit OAuth consent screen
 
     Args:
-        region: "US" or "CA" - determines which OAuth app to use
+        region: "US" or "CA" - determines which OAuth app to use (production only)
+        sandbox: When True, connect a sandbox company using the Intuit
+                 Development keys (region is ignored; sandbox is US-based)
 
     Returns:
         302 Redirect to Intuit OAuth authorization URL
@@ -202,44 +215,56 @@ async def qbo_connect(request: Request, region: str = "US"):
     # Verify authentication
     try:
         email = _require_auth(request)
-        logger.info(f"QBO OAuth connect initiated by {email} for region {region}")
+        env_label = "sandbox" if sandbox else region
+        logger.info(f"QBO OAuth connect initiated by {email} for {env_label}")
     except RedirectResponse as redirect:
         return redirect
 
-    # Validate region
-    if region not in ("US", "CA"):
-        return _error_response(f"Invalid region: {region}. Must be 'US' or 'CA'.")
+    # Sandbox is US-based and uses its own (Development) credentials
+    if sandbox:
+        region = "US"
+        if not settings.qbo_sandbox_configured:
+            logger.error("QBO OAuth not configured for sandbox")
+            return _error_response(
+                "QBO sandbox not configured. Set QBO_SANDBOX_CLIENT_ID and "
+                "QBO_SANDBOX_CLIENT_SECRET environment variables."
+            )
+    else:
+        # Validate region
+        if region not in ("US", "CA"):
+            return _error_response(f"Invalid region: {region}. Must be 'US' or 'CA'.")
 
-    # Check QBO credentials configured for this region
-    if region == "US" and not settings.qbo_us_configured:
-        logger.error("QBO OAuth not configured for US")
-        return _error_response(
-            "QBO OAuth not configured for US. Set QBO_CLIENT_ID and QBO_CLIENT_SECRET environment variables."
-        )
-    elif region == "CA" and not settings.qbo_ca_configured:
-        logger.error("QBO OAuth not configured for Canada")
-        return _error_response(
-            "QBO OAuth not configured for Canada. Set QBO_CA_CLIENT_ID and QBO_CA_CLIENT_SECRET environment variables."
-        )
+        # Check QBO credentials configured for this region
+        if region == "US" and not settings.qbo_us_configured:
+            logger.error("QBO OAuth not configured for US")
+            return _error_response(
+                "QBO OAuth not configured for US. Set QBO_CLIENT_ID and QBO_CLIENT_SECRET environment variables."
+            )
+        elif region == "CA" and not settings.qbo_ca_configured:
+            logger.error("QBO OAuth not configured for Canada")
+            return _error_response(
+                "QBO OAuth not configured for Canada. Set QBO_CA_CLIENT_ID and QBO_CA_CLIENT_SECRET environment variables."
+            )
 
     # Generate state for CSRF protection
     state = secrets.token_urlsafe(32)
 
-    # Store state and region in session (uses SessionMiddleware)
+    # Store state, region, and environment in session (uses SessionMiddleware)
     request.session["qbo_oauth_state"] = state
     request.session["qbo_oauth_region"] = region
+    request.session["qbo_oauth_sandbox"] = sandbox
 
     # Build authorization URL
-    auth_client = _get_intuit_auth_client(region=region)
+    auth_client = _get_intuit_auth_client(region=region, is_sandbox=sandbox)
     if not auth_client:
-        return _error_response(f"Failed to create auth client for region {region}")
+        return _error_response(f"Failed to create auth client for {env_label}")
 
     auth_url = auth_client.get_authorization_url(
         scopes=[Scopes.ACCOUNTING],
         state_token=state,
     )
 
-    logger.info(f"Redirecting to Intuit OAuth ({region}), state={state[:8]}...")
+    logger.info(f"Redirecting to Intuit OAuth ({env_label}), state={state[:8]}...")
 
     return RedirectResponse(url=auth_url, status_code=302)
 
@@ -292,20 +317,24 @@ async def qbo_callback(
         logger.error(f"State mismatch: stored={stored_state[:8] if stored_state else None}..., received={state[:8] if state else None}...")
         return _error_response("Invalid state parameter. Please try again.")
 
-    # Get region from session (stored during connect)
+    # Get region and environment from session (stored during connect)
     region = request.session.get("qbo_oauth_region", "US")
+    is_sandbox = bool(request.session.get("qbo_oauth_sandbox", False))
 
-    # Clear state and region from session
+    # Clear state, region, and environment from session
     del request.session["qbo_oauth_state"]
     if "qbo_oauth_region" in request.session:
         del request.session["qbo_oauth_region"]
+    if "qbo_oauth_sandbox" in request.session:
+        del request.session["qbo_oauth_sandbox"]
 
     try:
-        # Exchange code for tokens using region-specific credentials
-        auth_client = _get_intuit_auth_client(region=region)
+        # Exchange code for tokens using region/environment-specific credentials
+        auth_client = _get_intuit_auth_client(region=region, is_sandbox=is_sandbox)
         if not auth_client:
-            logger.error(f"Failed to create auth client for region {region}")
-            return _error_response(f"OAuth not configured for region {region}")
+            env_label = "sandbox" if is_sandbox else region
+            logger.error(f"Failed to create auth client for {env_label}")
+            return _error_response(f"OAuth not configured for {env_label}")
 
         auth_client.get_bearer_token(code, realm_id=realmId)
 
@@ -319,7 +348,7 @@ async def qbo_callback(
         logger.info(f"Successfully exchanged code for tokens, realm={realmId}")
 
         # Fetch company info
-        company_name = await _fetch_company_name(realmId, access_token)
+        company_name = await _fetch_company_name(realmId, access_token, is_sandbox)
         logger.info(f"Fetched company name: {company_name}")
 
         # Save to database
@@ -338,18 +367,20 @@ async def qbo_callback(
                 existing.refresh_token_expires_at = datetime.utcnow() + timedelta(days=100)
                 existing.token_status = "active"
                 existing.last_refreshed_at = datetime.utcnow()
+                existing.is_sandbox = is_sandbox
                 if company_name != "Unknown Company":
                     existing.name = company_name
                 db.commit()
                 logger.info(f"Updated existing QBO company: {existing.code}")
             else:
-                # Create new company with region
+                # Create new company with region/environment
                 company_code = _generate_company_code(db, company_name)
                 new_company = QboCompany(
                     name=company_name,
                     code=company_code,
                     realm_id=realmId,
                     region=region,
+                    is_sandbox=is_sandbox,
                     access_token=access_token,
                     refresh_token=refresh_token,
                     token_expires_at=datetime.utcnow() + timedelta(hours=1),
@@ -415,8 +446,10 @@ async def disconnect_company(request: Request, company_id: int):
         # Best-effort token revocation with Intuit (per OAuth 2.0 RFC 7009)
         if company.refresh_token or company.access_token:
             try:
-                # Use region-specific credentials for revocation
-                credentials = settings.get_qbo_credentials(company.region)
+                # Use region/environment-specific credentials for revocation
+                credentials = settings.get_qbo_credentials(
+                    company.region, is_sandbox=company.is_sandbox
+                )
                 if credentials:
                     client_id, client_secret = credentials
                     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -493,11 +526,12 @@ async def refresh_company_token(request: Request, company_id: int):
             }
 
         try:
-            # Refresh token using Intuit AuthClient with region-specific credentials
+            # Refresh token using Intuit AuthClient with region/environment-specific credentials
             auth_client = _get_intuit_auth_client(
                 region=company.region,
                 access_token=company.access_token,
                 refresh_token=company.refresh_token,
+                is_sandbox=company.is_sandbox,
             )
             if not auth_client:
                 return {

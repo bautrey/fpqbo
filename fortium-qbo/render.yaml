@@ -33,6 +33,11 @@ services:
         sync: false
       - key: QBO_CLIENT_SECRET
         sync: false
+      # QBO Sandbox — Intuit "Development" keys (optional; set manually)
+      - key: QBO_SANDBOX_CLIENT_ID
+        sync: false
+      - key: QBO_SANDBOX_CLIENT_SECRET
+        sync: false
 
       # Database - use Render's persistent disk or external PostgreSQL
       - key: DATABASE_URL
