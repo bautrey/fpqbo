@@ -232,8 +232,13 @@ def test_every_api_key_data_route_is_company_scoped(monkeypatch):
         )
 
 
-def test_no_api_key_route_selects_company_via_path_param(monkeypatch):
-    """A company_id path param would bypass the query-based scoping check."""
+def test_no_api_key_route_selects_company_outside_query(monkeypatch):
+    """company_id must come from the query, where the scoping check reads it.
+
+    A company_id supplied as a PATH or BODY param would leave the dependency's
+    query-bound company_id as None (check skipped) while the endpoint still
+    resolves the foreign company — a bypass. Guard against both locations.
+    """
     app = _load_app(monkeypatch)
 
     for r in app.routes:
@@ -242,7 +247,12 @@ def test_no_api_key_route_selects_company_via_path_param(monkeypatch):
         if not _uses_verify_api_key(getattr(r, "dependant", None)):
             continue
         path_param_names = {p.name for p in r.dependant.path_params}
+        body_param_names = {p.name for p in r.dependant.body_params}
         assert "company_id" not in path_param_names, (
             f"{sorted(r.methods)} {r.path} takes company_id as a PATH param; the "
+            f"scoping check reads it from the query, so this would bypass it."
+        )
+        assert "company_id" not in body_param_names, (
+            f"{sorted(r.methods)} {r.path} takes company_id as a BODY param; the "
             f"scoping check reads it from the query, so this would bypass it."
         )
