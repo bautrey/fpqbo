@@ -1,6 +1,11 @@
 # Core
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
+# Web stack pinned to exact versions: unpinned ranges let a fresh Render build
+# pull a newer Starlette whose changed TemplateResponse signature 500'd the
+# admin UI (June 2026). Pin fastapi + its starlette dep + uvicorn so redeploys
+# are reproducible. Bump deliberately, not by surprise-on-rebuild.
+fastapi==0.135.1
+starlette==0.52.1
+uvicorn[standard]==0.41.0
 
 # Database
 sqlalchemy>=2.0.0
