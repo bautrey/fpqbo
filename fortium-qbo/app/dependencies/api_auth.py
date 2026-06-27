@@ -5,7 +5,7 @@ import secrets
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import Cookie, Depends, Header, HTTPException, Request
+from fastapi import Cookie, Depends, Header, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,7 @@ def generate_api_key() -> tuple[str, str, str]:
 async def verify_api_key(
     request: Request,
     x_api_key: Annotated[str | None, Header()] = None,
+    company_id: Annotated[int | None, Query()] = None,
     db: Session = Depends(get_db),
 ) -> ApiKey:
     """
@@ -69,6 +70,19 @@ async def verify_api_key(
 
     # Log the request (status will be updated by middleware or manually)
     request.state.api_key = api_key
+
+    # Enforce company scoping: an API key may only act on its own company.
+    # company_id is declared above as a typed query param, so FastAPI/pydantic
+    # coerces it identically to the endpoints — the auth check compares exactly
+    # the value the endpoint will use, so crafted forms (" 2", "+2", "2\n") can't
+    # parse differently here to slip past the check. A non-integer company_id is
+    # rejected (422) by that same coercion before reaching this code, and
+    # endpoints without company_id pass None and are already key-scoped.
+    if company_id is not None and company_id != api_key.company_id:
+        raise HTTPException(
+            status_code=403,
+            detail="API key is not authorized for this company.",
+        )
 
     return api_key
 
