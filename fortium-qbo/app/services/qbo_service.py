@@ -317,7 +317,11 @@ class QBOService:
                         exc,
                     )
                     raise
-                backoff = QBO_RETRY_BACKOFF_SECONDS[attempt - 1]
+                # Clamp to the last backoff so bumping QBO_RETRY_ATTEMPTS beyond
+                # the tuple length reuses the final delay instead of IndexError.
+                backoff = QBO_RETRY_BACKOFF_SECONDS[
+                    min(attempt - 1, len(QBO_RETRY_BACKOFF_SECONDS) - 1)
+                ]
                 logger.warning(
                     "QBO transient fault on %s (attempt %d/%d), retrying in "
                     "%ds: %s",
