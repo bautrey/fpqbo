@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Index, String, Text
+from sqlalchemy import Boolean, Index, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -34,6 +34,9 @@ class QboCompany(Base):
     region: Mapped[str] = mapped_column(
         String(2), nullable=False, default="US"
     )  # "US" or "CA" - determines which OAuth credentials to use
+    is_sandbox: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )  # True = Intuit sandbox company (Development keys + sandbox API URL)
 
     # OAuth tokens
     access_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
