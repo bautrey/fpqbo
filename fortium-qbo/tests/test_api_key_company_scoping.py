@@ -174,3 +174,75 @@ def test_integration_non_integer_rejected():
 def test_integration_missing_api_key_401():
     r = _client(key_company_id=1).get("/probe", params={"company_id": "1"})
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Regression guard — keep the scoping convention enforceable as routes are added
+# ---------------------------------------------------------------------------
+#
+# The company-scoping check lives in verify_api_key and reads company_id from
+# the *query* param. Two invariants must hold for every api-key data endpoint,
+# or a future route could silently escape scoping:
+#   1. it actually depends on verify_api_key, and
+#   2. it selects the company via the query param (never a path param, which the
+#      scoping check does not read).
+# Admin OAuth-management routes (/api/qbo/*) are session-authed, not api-key
+# scoped, and are intentionally allowed to manage any company — excluded here.
+
+
+def _uses_verify_api_key(dependant) -> bool:
+    if dependant is None:
+        return False
+    if getattr(dependant, "call", None) is verify_api_key:
+        return True
+    return any(_uses_verify_api_key(d) for d in getattr(dependant, "dependencies", []))
+
+
+def _load_app(monkeypatch):
+    """Import the full app, resolving app.main's CWD-relative StaticFiles mount.
+
+    ``app.main`` mounts ``StaticFiles(directory="static")`` relative to the CWD
+    (fine under the Docker WORKDIR /app, but not pytest's CWD). chdir to the
+    package dir so the import works wherever pytest runs from.
+    """
+    import os
+
+    pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    monkeypatch.chdir(pkg_dir)
+    from app.main import app
+
+    return app
+
+
+def test_every_api_key_data_route_is_company_scoped(monkeypatch):
+    app = _load_app(monkeypatch)
+
+    data_routes = [
+        r
+        for r in app.routes
+        if getattr(r, "path", "").startswith("/api/")
+        and not r.path.startswith("/api/qbo/")
+    ]
+    assert data_routes, "expected /api/* data routes"
+
+    for r in data_routes:
+        assert _uses_verify_api_key(getattr(r, "dependant", None)), (
+            f"{sorted(r.methods)} {r.path} is an unscoped data endpoint — it must "
+            f"depend on verify_api_key (which enforces company scoping)."
+        )
+
+
+def test_no_api_key_route_selects_company_via_path_param(monkeypatch):
+    """A company_id path param would bypass the query-based scoping check."""
+    app = _load_app(monkeypatch)
+
+    for r in app.routes:
+        if not getattr(r, "path", "").startswith("/api/"):
+            continue
+        if not _uses_verify_api_key(getattr(r, "dependant", None)):
+            continue
+        path_param_names = {p.name for p in r.dependant.path_params}
+        assert "company_id" not in path_param_names, (
+            f"{sorted(r.methods)} {r.path} takes company_id as a PATH param; the "
+            f"scoping check reads it from the query, so this would bypass it."
+        )
