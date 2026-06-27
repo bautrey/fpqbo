@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -36,6 +36,31 @@ async def list_accounts(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.post("/", response_model=dict[str, Any], status_code=201)
+async def create_account(
+    company_id: int = Query(..., description="QBO company ID"),
+    account_data: dict[str, Any] = Body(..., description="Account data"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Create an account (chart-of-accounts entry) in QBO.
+
+    Example body:
+    {
+        "Name": "Administrative and Technology Fee",
+        "AccountType": "Income",
+        "AcctNum": "400100",
+        "Description": "Fees billed to clients",
+        "Active": true
+    }
+    """
+    try:
+        return await qbo.create_account(company_id, account_data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
