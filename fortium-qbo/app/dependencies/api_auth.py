@@ -70,6 +70,24 @@ async def verify_api_key(
     # Log the request (status will be updated by middleware or manually)
     request.state.api_key = api_key
 
+    # Enforce company scoping: an API key may only act on its own company.
+    # Every data endpoint takes company_id as a query param; if one is present
+    # it must match the key's company, so a key for one company can neither read
+    # nor write another (incl. across the prod/sandbox boundary). Endpoints
+    # without company_id (e.g. /api/companies/) are already implicitly scoped to
+    # the key's company. A non-integer company_id falls through to the endpoint's
+    # own 422 validation.
+    requested_company_id = request.query_params.get("company_id")
+    if (
+        requested_company_id is not None
+        and requested_company_id.isdigit()
+        and int(requested_company_id) != api_key.company_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="API key is not authorized for this company.",
+        )
+
     return api_key
 
 
