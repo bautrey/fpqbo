@@ -5,7 +5,7 @@ import secrets
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import Cookie, Depends, Header, HTTPException, Request
+from fastapi import Cookie, Depends, Header, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,7 @@ def generate_api_key() -> tuple[str, str, str]:
 async def verify_api_key(
     request: Request,
     x_api_key: Annotated[str | None, Header()] = None,
+    company_id: Annotated[int | None, Query()] = None,
     db: Session = Depends(get_db),
 ) -> ApiKey:
     """
@@ -71,18 +72,13 @@ async def verify_api_key(
     request.state.api_key = api_key
 
     # Enforce company scoping: an API key may only act on its own company.
-    # Every data endpoint takes company_id as a query param; if one is present
-    # it must match the key's company, so a key for one company can neither read
-    # nor write another (incl. across the prod/sandbox boundary). Endpoints
-    # without company_id (e.g. /api/companies/) are already implicitly scoped to
-    # the key's company. A non-integer company_id falls through to the endpoint's
-    # own 422 validation.
-    requested_company_id = request.query_params.get("company_id")
-    if (
-        requested_company_id is not None
-        and requested_company_id.isdigit()
-        and int(requested_company_id) != api_key.company_id
-    ):
+    # company_id is declared above as a typed query param, so FastAPI/pydantic
+    # coerces it identically to the endpoints — the auth check compares exactly
+    # the value the endpoint will use, so crafted forms (" 2", "+2", "2\n") can't
+    # parse differently here to slip past the check. A non-integer company_id is
+    # rejected (422) by that same coercion before reaching this code, and
+    # endpoints without company_id pass None and are already key-scoped.
+    if company_id is not None and company_id != api_key.company_id:
         raise HTTPException(
             status_code=403,
             detail="API key is not authorized for this company.",

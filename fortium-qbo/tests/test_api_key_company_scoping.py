@@ -1,22 +1,31 @@
 """Tests for per-company API-key scoping in verify_api_key.
 
-An API key is bound to one company; it must not be able to read or write
-another company by passing a different ``company_id`` query param (prevents
-cross-company / prod<->sandbox access). Hermetic: the DB lookup and Request
-are stubbed, so no network or real database is touched.
+An API key is bound to one company; it must not read or write another company
+by passing a different ``company_id`` (prevents cross-company / prod<->sandbox
+access).
+
+The important cases are the *integration* tests: they drive ``verify_api_key``
+through the real FastAPI/pydantic query coercion and assert the crafted bypass
+vectors (" 2", "+2", "2\\n", ...) cannot reach a foreign company. A previous
+fix gated on ``str.isdigit()`` — stricter than pydantic's int coercion — so
+those vectors skipped the check yet still resolved the target company; unit
+tests that passed clean strings missed it entirely.
 """
 
 import asyncio
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.testclient import TestClient
 
+from app.database import get_db
 from app.dependencies.api_auth import verify_api_key
 
 
-def _run(coro):
-    return asyncio.run(coro)
+# ---------------------------------------------------------------------------
+# Shared stubs
+# ---------------------------------------------------------------------------
 
 
 class _FakeResult:
@@ -40,62 +49,128 @@ class _FakeDB:
         pass
 
 
-class _FakeRequest:
-    def __init__(self, query: dict):
-        self.query_params = query
-        self.state = SimpleNamespace()
-
-
 def _make_key(company_id: int = 1):
     return SimpleNamespace(
         id=1, company_id=company_id, is_active=True, last_used_at=None
     )
 
 
-def test_allows_matching_company():
+# ---------------------------------------------------------------------------
+# Unit tests — the comparison logic (company_id already coerced to int)
+# ---------------------------------------------------------------------------
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+class _FakeRequest:
+    def __init__(self):
+        self.state = SimpleNamespace()
+
+
+def test_unit_allows_matching_company():
     key = _make_key(company_id=1)
-    req = _FakeRequest({"company_id": "1"})
-    result = _run(verify_api_key(req, x_api_key="fqbo_test", db=_FakeDB(key)))
+    result = _run(
+        verify_api_key(_FakeRequest(), x_api_key="fqbo_x", company_id=1, db=_FakeDB(key))
+    )
     assert result is key
 
 
-def test_rejects_cross_company_access():
-    """US key (company 1) requesting company 5 (sandbox) -> 403."""
+def test_unit_blocks_mismatched_company():
     key = _make_key(company_id=1)
-    req = _FakeRequest({"company_id": "5"})
     with pytest.raises(HTTPException) as exc:
-        _run(verify_api_key(req, x_api_key="fqbo_test", db=_FakeDB(key)))
+        _run(
+            verify_api_key(
+                _FakeRequest(), x_api_key="fqbo_x", company_id=5, db=_FakeDB(key)
+            )
+        )
     assert exc.value.status_code == 403
 
 
-def test_allows_when_no_company_id():
-    """Endpoints without company_id (e.g. /api/companies/) are not blocked."""
+def test_unit_allows_when_no_company_id():
     key = _make_key(company_id=1)
-    req = _FakeRequest({})
-    result = _run(verify_api_key(req, x_api_key="fqbo_test", db=_FakeDB(key)))
+    result = _run(
+        verify_api_key(_FakeRequest(), x_api_key="fqbo_x", company_id=None, db=_FakeDB(key))
+    )
     assert result is key
 
 
-def test_non_integer_company_id_falls_through():
-    """A non-numeric company_id is left for the endpoint's own 422 validation."""
+def test_unit_missing_api_key_header_401():
     key = _make_key(company_id=1)
-    req = _FakeRequest({"company_id": "abc"})
-    # Should not raise 403 here; verify_api_key returns the key and FastAPI's
-    # int query validation will reject "abc" downstream.
-    result = _run(verify_api_key(req, x_api_key="fqbo_test", db=_FakeDB(key)))
-    assert result is key
-
-
-def test_missing_api_key_header_401():
-    key = _make_key(company_id=1)
-    req = _FakeRequest({"company_id": "1"})
     with pytest.raises(HTTPException) as exc:
-        _run(verify_api_key(req, x_api_key=None, db=_FakeDB(key)))
+        _run(
+            verify_api_key(
+                _FakeRequest(), x_api_key=None, company_id=1, db=_FakeDB(key)
+            )
+        )
     assert exc.value.status_code == 401
 
 
-def test_invalid_api_key_401():
-    req = _FakeRequest({"company_id": "1"})
+def test_unit_invalid_api_key_401():
     with pytest.raises(HTTPException) as exc:
-        _run(verify_api_key(req, x_api_key="fqbo_bad", db=_FakeDB(None)))
+        _run(
+            verify_api_key(
+                _FakeRequest(), x_api_key="fqbo_bad", company_id=1, db=_FakeDB(None)
+            )
+        )
     assert exc.value.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — real FastAPI coercion (the bypass-resistant part)
+# ---------------------------------------------------------------------------
+
+
+def _client(key_company_id: int = 1) -> TestClient:
+    app = FastAPI()
+
+    @app.get("/probe")
+    def probe(company_id: int = Query(...), key=Depends(verify_api_key)):
+        # Reaching here means scoping allowed the call through.
+        return {"company_id": company_id, "key_company": key.company_id}
+
+    def _override_db():
+        yield _FakeDB(_make_key(company_id=key_company_id))
+
+    app.dependency_overrides[get_db] = _override_db
+    return TestClient(app)
+
+
+_HEADERS = {"X-API-Key": "fqbo_test"}
+
+
+def test_integration_matching_company_allowed():
+    r = _client(key_company_id=1).get("/probe", params={"company_id": "1"}, headers=_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["company_id"] == 1
+
+
+def test_integration_clean_cross_company_blocked():
+    r = _client(key_company_id=1).get("/probe", params={"company_id": "5"}, headers=_HEADERS)
+    assert r.status_code == 403
+
+
+# The exact vectors the reviewers reproduced as bypasses under isdigit(). Each
+# must NOT reach the foreign company: either 403 (coerced to the int and blocked)
+# or 422 (rejected by coercion) — never 200.
+@pytest.mark.parametrize(
+    "raw",
+    [" 2", "2 ", "+2", "2\n", "\t2", " 5 ", "+5"],
+)
+def test_integration_crafted_company_id_cannot_bypass(raw):
+    r = _client(key_company_id=1).get("/probe", params={"company_id": raw}, headers=_HEADERS)
+    assert r.status_code != 200, (
+        f"company_id={raw!r} reached a foreign company (status 200) — IDOR bypass!"
+    )
+    assert r.status_code in (403, 422), f"unexpected status {r.status_code} for {raw!r}"
+
+
+def test_integration_non_integer_rejected():
+    r = _client(key_company_id=1).get("/probe", params={"company_id": "abc"}, headers=_HEADERS)
+    assert r.status_code == 422
+
+
+def test_integration_missing_api_key_401():
+    r = _client(key_company_id=1).get("/probe", params={"company_id": "1"})
+    assert r.status_code == 401
