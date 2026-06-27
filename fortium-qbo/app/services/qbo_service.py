@@ -527,6 +527,125 @@ class QBOService:
         result = await asyncio.to_thread(_create)
         return result.to_dict()
 
+    async def create_account(
+        self, company_id: int, account_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create an Account (chart-of-accounts entry) in QBO.
+
+        Useful for seeding a sandbox company with the accounts that production
+        Items / transactions reference before recreating them.
+
+        Args:
+            company_id: QBO company ID
+            account_data: Dict with Name (required) and AccountType (required,
+                e.g. "Bank", "Expense", "Income", "Other Current Asset",
+                "Accounts Payable", "Credit Card", "Equity", "Fixed Asset").
+                Optional: AccountSubType, AcctNum, Description, Classification,
+                Active, SubAccount, CurrencyRef, ParentRef.
+
+        Returns:
+            Created Account as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            acct = Account()
+
+            # Simple string fields
+            for field in (
+                "Name", "AccountType", "AccountSubType", "AcctNum",
+                "Description", "Classification",
+            ):
+                if field in account_data:
+                    setattr(acct, field, account_data[field])
+
+            # Bool fields
+            for bool_field in ("Active", "SubAccount"):
+                if bool_field in account_data:
+                    setattr(acct, bool_field, account_data[bool_field])
+
+            # Ref fields
+            for ref_field in ("CurrencyRef", "ParentRef"):
+                if account_data.get(ref_field):
+                    ref = Ref()
+                    ref.value = str(account_data[ref_field]["value"])
+                    ref.name = account_data[ref_field].get("name")
+                    setattr(acct, ref_field, ref)
+
+            return acct.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
+
+    async def create_item(
+        self, company_id: int, item_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create an Item (product/service) in QBO.
+
+        Useful for recreating production Items in a sandbox for testing. Note
+        that account Refs (IncomeAccountRef, etc.) must point at accounts in the
+        *target* company — a production account Id won't exist in the sandbox,
+        so resolve the sandbox account Id (e.g. via GET /api/accounts/) before
+        creating.
+
+        Args:
+            company_id: QBO company ID
+            item_data: Dict with Name (required) and Type (required: "Service",
+                "NonInventory", or "Inventory"). Optional: Description,
+                PurchaseDesc, Sku, UnitPrice, PurchaseCost, Taxable,
+                SalesTaxIncluded, PurchaseTaxIncluded, TrackQtyOnHand, QtyOnHand,
+                InvStartDate, Active, SubItem, and Ref fields IncomeAccountRef
+                (required for sale-able items), ExpenseAccountRef,
+                AssetAccountRef (required for Inventory), ParentRef,
+                SalesTaxCodeRef, PurchaseTaxCodeRef.
+
+        Returns:
+            Created Item as dict
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            item = Item()
+
+            # Simple string fields
+            for field in (
+                "Name", "Type", "Description", "PurchaseDesc", "Sku",
+                "InvStartDate",
+            ):
+                if field in item_data:
+                    setattr(item, field, item_data[field])
+
+            # Numeric fields
+            for num_field in ("UnitPrice", "PurchaseCost", "QtyOnHand"):
+                if num_field in item_data:
+                    setattr(item, num_field, item_data[num_field])
+
+            # Bool fields
+            for bool_field in (
+                "Active", "Taxable", "SalesTaxIncluded", "PurchaseTaxIncluded",
+                "TrackQtyOnHand", "SubItem",
+            ):
+                if bool_field in item_data:
+                    setattr(item, bool_field, item_data[bool_field])
+
+            # Ref fields
+            for ref_field in (
+                "IncomeAccountRef", "ExpenseAccountRef", "AssetAccountRef",
+                "ParentRef", "SalesTaxCodeRef", "PurchaseTaxCodeRef",
+            ):
+                if item_data.get(ref_field):
+                    ref = Ref()
+                    ref.value = str(item_data[ref_field]["value"])
+                    ref.name = item_data[ref_field].get("name")
+                    setattr(item, ref_field, ref)
+
+            return item.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
+
     async def create_vendor(
         self, company_id: int, vendor_data: dict[str, Any]
     ) -> dict[str, Any]:

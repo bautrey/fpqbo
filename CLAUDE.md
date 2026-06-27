@@ -98,6 +98,8 @@ All `/api/*` endpoints require `X-API-Key` header.
 | GET | `/api/reports/general-ledger` | General Ledger report |
 | POST | `/api/customers/` | Create a customer |
 | POST | `/api/vendors/` | Create a vendor |
+| POST | `/api/accounts/` | Create an account (chart of accounts) |
+| POST | `/api/items/` | Create an item (product/service) |
 | POST | `/api/bills/` | Create a bill |
 | POST | `/api/bills/{bill_id}` | Update a bill (sparse update) |
 | POST | `/api/bill-payments/` | Create a bill payment (also applies VendorCredit via `LinkedTxn`) |

@@ -1,6 +1,6 @@
 """Item endpoints."""
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import verify_api_key
@@ -29,6 +29,36 @@ async def list_items(
         return await qbo.get_items(company_id=company_id, active_only=active_only, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.post("/", response_model=dict[str, Any], status_code=201)
+async def create_item(
+    company_id: int = Query(..., description="QBO company ID"),
+    item_data: dict[str, Any] = Body(..., description="Item data"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Create an item (product/service) in QBO.
+
+    Account Refs must point at accounts in the target company — a production
+    account Id won't exist in the sandbox, so resolve the sandbox account Id
+    (via GET /api/accounts/) before creating.
+
+    Example body:
+    {
+        "Name": "Administrative and Technology Fee",
+        "Type": "Service",
+        "Description": "Administrative and Technology Fee",
+        "IncomeAccountRef": {"value": "42", "name": "Administrative and Technology Fee"},
+        "Taxable": false,
+        "Active": true
+    }
+    """
+    try:
+        return await qbo.create_item(company_id, item_data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
