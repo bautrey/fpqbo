@@ -9,6 +9,8 @@ the sandbox API base URL), while production companies are unaffected. The Intuit
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+from sqlalchemy import create_engine, inspect, text
+
 from app.config import Settings
 
 
@@ -214,3 +216,70 @@ def test_get_client_uses_production_environment(monkeypatch):
 
     assert recorded["environment"] == "production"
     assert recorded["client_id"] == "us-id"
+
+
+# ---------------------------------------------------------------------------
+# database._ensure_additive_columns startup guard (recurrence prevention)
+# ---------------------------------------------------------------------------
+
+
+def _seed_old_schema(engine):
+    """Create a qbo_companies table WITHOUT is_sandbox + one row."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE qbo_companies ("
+                "id INTEGER PRIMARY KEY, name TEXT, code TEXT, realm_id TEXT, "
+                "region TEXT NOT NULL DEFAULT 'US')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO qbo_companies (name, code, realm_id, region) "
+                "VALUES ('Old Co', 'FOR-138', '999', 'US')"
+            )
+        )
+
+
+def test_ensure_additive_columns_adds_and_backfills(tmp_path, monkeypatch):
+    """Existing table missing is_sandbox gets the column, backfilled to False."""
+    import app.database as d
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'guard.db'}")
+    _seed_old_schema(engine)
+    monkeypatch.setattr(d, "engine", engine)
+
+    d._ensure_additive_columns()
+
+    cols = {c["name"] for c in inspect(engine).get_columns("qbo_companies")}
+    assert "is_sandbox" in cols
+    with engine.connect() as conn:
+        value = conn.execute(
+            text("SELECT is_sandbox FROM qbo_companies WHERE code = 'FOR-138'")
+        ).scalar()
+    assert value in (0, False)  # existing row backfilled to the default
+
+
+def test_ensure_additive_columns_is_idempotent(tmp_path, monkeypatch):
+    """Running the guard twice is a no-op and never raises."""
+    import app.database as d
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'guard.db'}")
+    _seed_old_schema(engine)
+    monkeypatch.setattr(d, "engine", engine)
+
+    d._ensure_additive_columns()
+    d._ensure_additive_columns()  # second pass: column already present
+
+    cols = {c["name"] for c in inspect(engine).get_columns("qbo_companies")}
+    assert "is_sandbox" in cols
+
+
+def test_ensure_additive_columns_noop_when_table_absent(tmp_path, monkeypatch):
+    """No qbo_companies table yet (fresh DB) -> guard is a safe no-op."""
+    import app.database as d
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'empty.db'}")
+    monkeypatch.setattr(d, "engine", engine)
+
+    d._ensure_additive_columns()  # must not raise

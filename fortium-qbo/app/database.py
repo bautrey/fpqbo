@@ -4,6 +4,7 @@ import logging
 from collections.abc import Generator
 
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
@@ -73,14 +74,29 @@ def _ensure_additive_columns() -> None:
     existing_columns = {col["name"] for col in inspector.get_columns("qbo_companies")}
     if "is_sandbox" not in existing_columns:
         # BOOLEAN NOT NULL DEFAULT false is valid on both PostgreSQL and SQLite.
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "ALTER TABLE qbo_companies "
-                    "ADD COLUMN is_sandbox BOOLEAN NOT NULL DEFAULT false"
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE qbo_companies "
+                        "ADD COLUMN is_sandbox BOOLEAN NOT NULL DEFAULT false"
+                    )
                 )
-            )
-        logger.info("Added missing column qbo_companies.is_sandbox")
+            logger.info("Added missing column qbo_companies.is_sandbox")
+        except (OperationalError, ProgrammingError):
+            # Another instance may add the column concurrently on first deploy
+            # (Postgres -> DuplicateColumn/ProgrammingError, SQLite ->
+            # OperationalError). Re-check rather than crash the boot; only
+            # re-raise if the column is genuinely still missing.
+            columns_after = {
+                col["name"] for col in inspect(engine).get_columns("qbo_companies")
+            }
+            if "is_sandbox" in columns_after:
+                logger.info(
+                    "qbo_companies.is_sandbox was added concurrently; continuing"
+                )
+            else:
+                raise
 
 
 def get_db() -> Generator[Session, None, None]:
