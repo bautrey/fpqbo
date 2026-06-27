@@ -39,6 +39,14 @@
                     <span class="fi fi-ca me-2"></span>Canada (Production)
                 </a></li>
                 {% endif %}
+                {% if qbo_sandbox_configured %}
+                {% if qbo_us_configured or qbo_ca_configured %}
+                <li><hr class="dropdown-divider"></li>
+                {% endif %}
+                <li><a class="dropdown-item" href="/api/qbo/connect?sandbox=true">
+                    <i class="bi bi-cone-striped me-2"></i>Sandbox (Testing)
+                </a></li>
+                {% endif %}
             </ul>
         </div>
         {% else %}
@@ -104,7 +112,11 @@
                             <td class="fw-semibold">{{ company.name }}</td>
                             <td><code>{{ company.code }}</code></td>
                             <td>
-                                {% if company.region == "CA" %}
+                                {% if company.is_sandbox %}
+                                <span class="badge bg-warning text-dark" title="Intuit sandbox company">
+                                    <i class="bi bi-cone-striped"></i> Sandbox
+                                </span>
+                                {% elif company.region == "CA" %}
                                 <span class="badge bg-secondary">🇨🇦 CA</span>
                                 {% else %}
                                 <span class="badge bg-primary">🇺🇸 US</span>

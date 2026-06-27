@@ -131,12 +131,15 @@ class QBOService:
         IMPORTANT: Intuit rotates refresh tokens on each refresh.
         If we successfully refresh but fail to save, we lose the new token.
         """
-        credentials = settings.get_qbo_credentials(company.region)
+        credentials = settings.get_qbo_credentials(
+            company.region, is_sandbox=company.is_sandbox
+        )
         if not credentials:
-            raise ValueError(f"QBO credentials not configured for region: {company.region}")
+            env_label = "sandbox" if company.is_sandbox else company.region
+            raise ValueError(f"QBO credentials not configured for: {env_label}")
 
         client_id, client_secret = credentials
-        environment = "production"
+        environment = "sandbox" if company.is_sandbox else "production"
 
         auth_client = AuthClient(
             client_id=client_id,
@@ -190,13 +193,17 @@ class QBOService:
             if self._needs_refresh(company):
                 self._refresh_token(company)
 
-            credentials = settings.get_qbo_credentials(company.region)
+            credentials = settings.get_qbo_credentials(
+                company.region, is_sandbox=company.is_sandbox
+            )
             if not credentials:
-                raise ValueError(f"QBO credentials not configured for region: {company.region}")
+                env_label = "sandbox" if company.is_sandbox else company.region
+                raise ValueError(f"QBO credentials not configured for: {env_label}")
 
             client_id, client_secret = credentials
-            # Both US and Canada now use production environment
-            environment = "production"
+            # Sandbox companies use the "sandbox" environment (Development keys);
+            # the QuickBooks SDK derives the sandbox API URL from this automatically.
+            environment = "sandbox" if company.is_sandbox else "production"
 
             auth_client = AuthClient(
                 client_id=client_id,
@@ -1787,10 +1794,12 @@ class QBOService:
         if self._needs_refresh(company):
             self._refresh_token(company)
 
-        url = (
-            f"https://quickbooks.api.intuit.com/v3/company/"
-            f"{company.realm_id}/reports/{report_name}"
+        base_url = (
+            "https://sandbox-quickbooks.api.intuit.com"
+            if company.is_sandbox
+            else "https://quickbooks.api.intuit.com"
         )
+        url = f"{base_url}/v3/company/{company.realm_id}/reports/{report_name}"
         params["minorversion"] = str(QBO_MINOR_VERSION)
 
         async with httpx.AsyncClient(timeout=30.0) as client:

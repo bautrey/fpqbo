@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     qbo_ca_client_id: str | None = None
     qbo_ca_client_secret: SecretStr | None = None
 
+    # QBO OAuth - Sandbox (Intuit "Development" keys; connect to sandbox companies)
+    # These are the app's Development client_id/secret from developer.intuit.com.
+    # They only authorize against sandbox companies via sandbox-quickbooks.api.intuit.com.
+    qbo_sandbox_client_id: str | None = None
+    qbo_sandbox_client_secret: SecretStr | None = None
+
     # DEPRECATED - tokens now stored in database (kept for migration)
     qbo_access_token: SecretStr | None = None
     qbo_refresh_token: str | None = None
@@ -58,8 +64,12 @@ class Settings(BaseSettings):
 
     @property
     def qbo_configured(self) -> bool:
-        """Check if any QBO OAuth is configured (US or CA)."""
-        return self.qbo_us_configured or self.qbo_ca_configured
+        """Check if any QBO OAuth is configured (US, CA, or sandbox)."""
+        return (
+            self.qbo_us_configured
+            or self.qbo_ca_configured
+            or self.qbo_sandbox_configured
+        )
 
     @property
     def qbo_us_configured(self) -> bool:
@@ -71,16 +81,35 @@ class Settings(BaseSettings):
         """Check if Canada QBO OAuth is configured."""
         return bool(self.qbo_ca_client_id and self.qbo_ca_client_secret)
 
-    def get_qbo_credentials(self, region: str) -> tuple[str, str] | None:
+    @property
+    def qbo_sandbox_configured(self) -> bool:
+        """Check if QBO sandbox (Development keys) OAuth is configured."""
+        return bool(self.qbo_sandbox_client_id and self.qbo_sandbox_client_secret)
+
+    def get_qbo_credentials(
+        self, region: str, is_sandbox: bool = False
+    ) -> tuple[str, str] | None:
         """
-        Get QBO OAuth credentials for a specific region.
+        Get QBO OAuth credentials for a specific region / environment.
+
+        Sandbox connections use the app's Intuit Development keys regardless of
+        region (Intuit's default sandbox company is US-based). Production
+        connections select credentials by region.
 
         Args:
             region: "US" or "CA"
+            is_sandbox: When True, return the sandbox (Development) credentials
 
         Returns:
             Tuple of (client_id, client_secret) or None if not configured
         """
+        if is_sandbox:
+            if self.qbo_sandbox_configured:
+                return (
+                    self.qbo_sandbox_client_id,
+                    self.qbo_sandbox_client_secret.get_secret_value(),
+                )
+            return None
         if region == "US" and self.qbo_us_configured:
             return (self.qbo_client_id, self.qbo_client_secret.get_secret_value())
         elif region == "CA" and self.qbo_ca_configured:
