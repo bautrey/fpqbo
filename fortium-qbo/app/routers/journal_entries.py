@@ -84,9 +84,12 @@ async def void_journal_entry(
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
     """Void a specific journal entry by ID."""
-    return await run_qbo_write(
-        qbo.void_journal_entry(company_id, entity_id), entity="journal entry"
-    )
+    try:
+        return await qbo.void_journal_entry(company_id, entity_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
 
 @router.get("/{entity_id}", response_model=dict[str, Any])

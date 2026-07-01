@@ -118,10 +118,10 @@ async def update_bill(
         raise HTTPException(
             status_code=400,
             detail=f"Invalid or missing field in bill payload: {e}",
-        )
+        ) from e
     except Exception as e:
         logger.error("QBO write failed for bill: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}") from e
 
 
 @router.delete("/{bill_id}", response_model=dict[str, Any])

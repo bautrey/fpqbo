@@ -1,8 +1,12 @@
-"""Shared error-handling helper for QBO write/mutation endpoints.
+"""Shared error-handling helper for QBO create/update write endpoints.
 
-Write endpoints (POST create/update, POST void, DELETE) must distinguish
-*client* errors (bad request → 4xx) from *server* errors (real QBO failures →
-5xx), and must log the 5xx path so genuine failures leave a breadcrumb.
+Body-taking POST create/update endpoints must distinguish *client* errors (bad
+request → 4xx) from *server* errors (real QBO failures → 5xx), and must log the
+5xx path so genuine failures leave a breadcrumb.
+
+Scope note: not-found-semantic endpoints (POST void, DELETE) do NOT use this
+helper — they map a missing entity to 404, which this helper's uniform
+ValueError→400 would clobber. Those keep their own try/except.
 
 ``run_qbo_write`` wraps a QBO write coroutine and maps exceptions:
 
@@ -43,13 +47,18 @@ async def run_qbo_write(coro: Awaitable[Any], *, entity: str) -> Any:
     """
     try:
         return await coro
+    except HTTPException:
+        # A specific HTTP error already chosen by the endpoint/service (404, 409,
+        # ...) must pass through unchanged — the catch-all below would otherwise
+        # mask it as a 500. (HTTPException is a subclass of Exception.)
+        raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except (KeyError, TypeError) as e:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid or missing field in {entity} payload: {e}",
-        )
+        ) from e
     except Exception as e:
         logger.error("QBO write failed for %s: %s", entity, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}") from e

@@ -70,3 +70,17 @@ def test_generic_exception_maps_to_500_and_logs(caplog):
 def test_success_returns_value_unchanged():
     result = _run(run_qbo_write(_return({"Id": "42"}), entity="account"))
     assert result == {"Id": "42"}
+
+
+def test_httpexception_passes_through_unchanged():
+    """A specific HTTP error from the wrapped coroutine must NOT become a 500.
+
+    HTTPException subclasses Exception, so without an explicit re-raise the
+    catch-all would mask a 404/409 as a 500 "QBO API error".
+    """
+    original = HTTPException(status_code=404, detail="JournalEntry 999 not found")
+    with pytest.raises(HTTPException) as exc:
+        _run(run_qbo_write(_raise(original), entity="journal entry"))
+    assert exc.value is original
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "JournalEntry 999 not found"
