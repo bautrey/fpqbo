@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import verify_api_key
+from app.routers._qbo_write import run_qbo_write
 from app.services.qbo_service import QBOService, get_qbo_service
 
 router = APIRouter(
@@ -57,12 +58,9 @@ async def create_account(
         "Active": true
     }
     """
-    try:
-        return await qbo.create_account(company_id, account_data)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+    return await run_qbo_write(
+        qbo.create_account(company_id, account_data), entity="account"
+    )
 
 
 @router.get("/by-number/{account_number}", response_model=dict[str, Any])
