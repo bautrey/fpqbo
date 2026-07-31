@@ -93,6 +93,27 @@ _TRANSIENT_NETWORK_ERRORS = (
 )
 
 
+def _txn_date_clause(
+    start_date: datetime | None, end_date: datetime | None
+) -> str | None:
+    """Build the TxnDate portion of a QBO query, or None when unbounded.
+
+    Either bound on its own produces a one-sided filter. Requiring both would
+    mean a caller who sends only `start_date` gets every row back with a 200
+    and no indication the bound was dropped.
+
+    The bounds are `datetime` objects rather than strings so the values
+    interpolated into the query are always a `strftime` result, never
+    caller-supplied text.
+    """
+    clauses = []
+    if start_date:
+        clauses.append(f"TxnDate >= '{start_date.strftime('%Y-%m-%d')}'")
+    if end_date:
+        clauses.append(f"TxnDate <= '{end_date.strftime('%Y-%m-%d')}'")
+    return " AND ".join(clauses) if clauses else None
+
+
 def _is_transient_qbo_error(exc: Exception) -> bool:
     """Return True if `exc` is a transient QBO/network fault worth retrying.
 
@@ -361,13 +382,9 @@ class QBOService:
         client = self._get_client(company)
 
         def _fetch():
-            if start_date and end_date:
-                return Invoice.where(
-                    f"TxnDate >= '{start_date.strftime('%Y-%m-%d')}' "
-                    f"AND TxnDate <= '{end_date.strftime('%Y-%m-%d')}'",
-                    max_results=max_results,
-                    qb=client,
-                )
+            clause = _txn_date_clause(start_date, end_date)
+            if clause:
+                return Invoice.where(clause, max_results=max_results, qb=client)
             return Invoice.all(max_results=max_results, qb=client)
 
         invoices = await self._to_thread_with_retry(_fetch, op="get_invoices")
@@ -757,13 +774,20 @@ class QBOService:
         return account.to_dict() if account else None
 
     async def get_bills(
-        self, company_id: int, max_results: int = 1000
+        self,
+        company_id: int,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        max_results: int = 1000,
     ) -> list[dict[str, Any]]:
-        """Get bills."""
+        """Get bills, optionally filtered by date range."""
         company = self._get_company(company_id)
         client = self._get_client(company)
 
         def _fetch():
+            clause = _txn_date_clause(start_date, end_date)
+            if clause:
+                return Bill.where(clause, max_results=max_results, qb=client)
             return Bill.all(max_results=max_results, qb=client)
 
         bills = await self._to_thread_with_retry(_fetch, op="get_bills")
@@ -948,13 +972,9 @@ class QBOService:
         client = self._get_client(company)
 
         def _fetch():
-            if start_date and end_date:
-                return Payment.where(
-                    f"TxnDate >= '{start_date.strftime('%Y-%m-%d')}' "
-                    f"AND TxnDate <= '{end_date.strftime('%Y-%m-%d')}'",
-                    max_results=max_results,
-                    qb=client,
-                )
+            clause = _txn_date_clause(start_date, end_date)
+            if clause:
+                return Payment.where(clause, max_results=max_results, qb=client)
             return Payment.all(max_results=max_results, qb=client)
 
         payments = await self._to_thread_with_retry(_fetch, op="get_payments")
@@ -1345,12 +1365,20 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_purchases(
-        self, company_id: int, max_results: int = 1000
+        self,
+        company_id: int,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        max_results: int = 1000,
     ) -> list[dict[str, Any]]:
+        """Get purchases, optionally filtered by date range."""
         company = self._get_company(company_id)
         client = self._get_client(company)
 
         def _fetch():
+            clause = _txn_date_clause(start_date, end_date)
+            if clause:
+                return Purchase.where(clause, max_results=max_results, qb=client)
             return Purchase.all(max_results=max_results, qb=client)
 
         items = await self._to_thread_with_retry(_fetch, op="get_purchases")
