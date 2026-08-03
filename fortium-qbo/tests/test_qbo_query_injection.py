@@ -420,9 +420,31 @@ def test_a_query_that_cannot_be_built_is_not_answered_as_a_missing_bill():
 # not care what it is for, so it sees helpers that hand their result back to
 # a caller in another function, and pays for that with a narrower file set.
 #
-# Neither is a taint analysis. What they are is two cheap properties that
-# between them cover every spelling of the original defect, with the shapes
-# they do not cover written down rather than assumed away.
+# Neither is a taint analysis, and neither can carry "every spelling" — the
+# interpolation guard shipped without a `.format()` arm, and a `.format()`
+# helper in qbo_service.py reintroduced issue #2 in full with both guards
+# green. What they are is two cheap properties, and what they still miss is
+# written down here rather than assumed away:
+#
+#   - a template that is not a string literal in the source. The
+#     interpolation guard reads the quote out of the source text, so
+#     `TEMPLATE.format(doc)` with the template a module constant is past what
+#     it can see. The call-site guard still catches that one when it reaches a
+#     query call, because it recognises `.format()` by the call rather than by
+#     the quote.
+#   - a clause assembled by a function instead of by formatting syntax —
+#     `"'".join(parts)` is the one to watch. Neither guard has an arm for it:
+#     no literal for the interpolation guard to read the quote out of, and
+#     nothing in the call-site guard's list of formatting operations either.
+#   - a module that imports neither the SDK nor the clause helpers, builds
+#     clause text, and hands it to a caller in another module. The
+#     interpolation guard does not read that file (the file set is pinned, and
+#     argued for, in
+#     `test_the_interpolation_guard_reads_only_the_modules_that_can_query_qbo`)
+#     and the call-site guard reads it but finds no query call to hang it on.
+#   - a binding that is not a plain local name. The call-site guard tracks
+#     `clause = ...`, not `self.clause = ...`; the interpolation guard covers
+#     the attribute case instead, since it never asks where the string went.
 # ---------------------------------------------------------------------------
 
 APP_ROOT = pathlib.Path(__file__).resolve().parent.parent / "app"
@@ -442,6 +464,20 @@ _FORMATTING_OPS = (ast.Add, ast.Mod)
 # `clause = "DocNumber = '"` followed by `clause += doc` is the same defect
 # spelled across two statements.
 _UNFORMATTED = "string constant"
+
+# A description composes — `concatenation of a <kind>`, `<kind>, bound to
+# 'clause'` — and the binding pass below runs to a fixpoint, re-deriving
+# `clause += value` from the kind the previous pass stored. Uncapped, that
+# grows a wrapper per pass, and the `+=` shape reported itself as a
+# "concatenation of a concatenation of a concatenation of a ..., bound to
+# 'clause', bound to 'clause', ...". Two levels name the formatting and where
+# it was bound; past that the file and the line are buried in the noise.
+_MAX_KIND_NESTING = 2
+
+
+def _nesting(kind: str) -> int:
+    """How many times a description has been wrapped around another."""
+    return kind.count(" of a ") + kind.count(", bound to ")
 
 
 def _operands(node):
@@ -490,6 +526,8 @@ def _formatting_kind(node, bindings) -> str | None:
         kind = bindings.get(node.id)
         if kind is None or kind == _UNFORMATTED:
             return None
+        if _nesting(kind) >= _MAX_KIND_NESTING:
+            return kind
         return f"{kind}, bound to {node.id!r}"
     if isinstance(node, ast.BinOp) and isinstance(node.op, _FORMATTING_OPS):
         operands = _operands(node)
@@ -498,6 +536,8 @@ def _formatting_kind(node, bindings) -> str | None:
             None,
         )
         if inherited:
+            if _nesting(inherited) >= _MAX_KIND_NESTING:
+                return inherited
             return f"concatenation of a {inherited}"
         text = [o for o in operands if _is_unformatted_string(o, bindings)]
         values = [o for o in operands if not _is_unformatted_string(o, bindings)]
@@ -740,9 +780,16 @@ Invoice.where("DocNumber = '1'" " AND Balance > '0'", qb=client)
 def test_the_call_site_guard_catches_every_way_of_formatting_a_clause(shape):
     tree = ast.parse(VIOLATING_CALL_SITES[shape])
 
-    assert _offenders_in_tree(tree, _query_clause_offenders), (
-        f"a clause built by {shape} passed the guard"
-    )
+    offenders = _offenders_in_tree(tree, _query_clause_offenders)
+
+    assert offenders, f"a clause built by {shape} passed the guard"
+    for _, how in offenders:
+        # The file and the line are what a failure is read for. A description
+        # that nests once per binding pass buries them, and this guard's whole
+        # bet is that it is not annoying enough to be deleted.
+        assert _nesting(how) <= _MAX_KIND_NESTING, (
+            f"the description of {shape} nests without limit: {how}"
+        )
 
 
 @pytest.mark.parametrize("shape", sorted(CLEAN_CALL_SITES))
@@ -804,6 +851,17 @@ def _interpolated_literal_offenders(tree):
     something between two ``'`` is either a QBO literal or it is a sentence
     that reads like one, and on the query path the difference is not worth
     guessing at.
+
+    One arm per way of writing it: the f-string, ``+``/``%``, and
+    ``.format()``. The last one is here because it is what the SDK's own
+    ``build_where_clause`` builds clauses with, so it is the spelling the next
+    person copies — and it is the arm this guard shipped without.
+
+    All three read the quote out of the source, so all three stop where the
+    template is not a literal. ``TEMPLATE.format(doc)`` is past this one and
+    is caught by the call-site guard, which recognises ``.format()`` by the
+    call. ``"'".join(parts)`` is past both, and is written down as such in the
+    comment above.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
@@ -819,6 +877,21 @@ def _interpolated_literal_offenders(tree):
             values = [o for o in operands if _constant_text(o) is None]
             if text and values and any("'" in t for t in text):
                 yield node.lineno, "concatenation into a quoted literal"
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"format", "format_map"}
+        ):
+            template = _constant_text(node.func.value)
+            # The quote has to be in the template. `"{0}/company/{1}/bill"
+            # .format(...)` builds a url, and joining two finished clauses
+            # with `"{} AND {}"` puts no quote of its own into either.
+            if (
+                template is not None
+                and (node.args or node.keywords)
+                and "'" in template
+            ):
+                yield node.lineno, ".format() into a quoted literal"
 
 
 def test_no_module_on_the_query_path_interpolates_into_a_quoted_literal():
@@ -845,7 +918,8 @@ def _plant(tmp_path, name, source):
     return path
 
 
-REINTRODUCED_IN_A_NEW_MODULE = '''
+REINTRODUCED_IN_A_NEW_MODULE = {
+    "f-string": '''
 """A new service module, written next year, that does not use the helper."""
 
 from quickbooks.objects.invoice import Invoice
@@ -853,33 +927,108 @@ from quickbooks.objects.invoice import Invoice
 
 def lookup_clause(doc_number):
     return f"DocNumber = '{doc_number}'"
-'''
-
-REINTRODUCED_BY_CONCATENATION = '''
+''',
+    "concatenation": '''
 from quickbooks.objects.invoice import Invoice
 
 
 def lookup_clause(doc_number):
     return "DocNumber = '" + doc_number + "'"
-'''
+''',
+    # The shape that got past both guards. `.format()` is what the SDK's own
+    # helpers build clauses with, so it is the spelling someone reaches for
+    # after reading them — and it is issue #2 exactly: a caller sending
+    # `10044' OR DocNumber LIKE '%` gets the whole invoice list with a 200.
+    ".format()": '''
+from quickbooks.objects.invoice import Invoice
 
 
-@pytest.mark.parametrize(
-    "source", [REINTRODUCED_IN_A_NEW_MODULE, REINTRODUCED_BY_CONCATENATION]
-)
-def test_the_interpolation_guard_reads_more_than_one_file(tmp_path, source):
-    """The defect does not have to come back to the file it left.
+def lookup_clause(doc_number):
+    return "DocNumber = '{}'".format(doc_number)
+''',
+    ".format_map()": '''
+from quickbooks.objects.invoice import Invoice
+
+
+def lookup_clause(doc_number):
+    return "DocNumber = '{doc}'".format_map({"doc": doc_number})
+''',
+    # The same miss one spelling further out: built into an attribute in one
+    # method, queried in another. Plain local names are the only bindings the
+    # call-site guard tracks, so `self.clause` is out of its reach at both
+    # ends — which is why this arm cannot depend on where the string goes.
+    ".format() into an attribute": '''
+from quickbooks.objects.invoice import Invoice
+
+
+class Lookup:
+    def build(self, doc_number):
+        self.clause = "DocNumber = '{}'".format(doc_number)
+
+    def run(self, client):
+        return Invoice.where(self.clause, qb=client)
+''',
+}
+
+# Formatting is not the defect; formatting *into a quoted literal* is. These
+# are on the query path, they format, and they must stay clean.
+NOT_A_CLAUSE_ON_THE_QUERY_PATH = {
+    # The only two `.format()` calls the service has today
+    # (qbo_service.py:1079 and :1577) build a REST url. No quote in the
+    # template means no literal to break out of.
+    "a url built by .format()": '''
+from quickbooks.objects.bill import Bill
+
+
+def bill_url(client):
+    return "{0}/company/{1}/bill".format(client.api_url, client.company_id)
+''',
+    # Joining finished clauses. The quotes are already in the values, put
+    # there by the helper; the template holds an operator and nothing else.
+    "clauses joined by .format()": '''
+from app.utils.qbo_query import date_bound, string_equals
+
+
+def combined(doc, start):
+    return "{} AND {}".format(
+        string_equals("DocNumber", doc), date_bound("TxnDate", ">=", start)
+    )
+''',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(REINTRODUCED_IN_A_NEW_MODULE))
+def test_the_interpolation_guard_catches_every_spelling_in_a_new_module(
+    tmp_path, shape
+):
+    """The defect does not have to come back to the file, or the syntax, it left.
 
     This guard used to read ``services/qbo_service.py`` and nothing else, so a
-    new module was free to build its clauses the old way.
+    new module was free to build its clauses the old way. These modules are
+    planted whole and scanned by the same function that reads the real tree,
+    so the guard cannot be narrowed on either axis without one going green.
     """
-    _plant(tmp_path, "new_service.py", source)
+    _plant(tmp_path, "new_service.py", REINTRODUCED_IN_A_NEW_MODULE[shape])
 
     offenders = _scan(
         tmp_path, _interpolated_literal_offenders, files=_query_path_files(tmp_path)
     )
 
-    assert offenders, "a clause built in a new module was not read at all"
+    assert offenders, f"a clause built by {shape} in a new module was not flagged"
+
+
+@pytest.mark.parametrize("shape", sorted(NOT_A_CLAUSE_ON_THE_QUERY_PATH))
+def test_the_interpolation_guard_leaves_the_formatting_that_is_not_a_clause_alone(
+    tmp_path, shape
+):
+    """False positives are how a guard gets deleted — the second guard too."""
+    _plant(tmp_path, "new_service.py", NOT_A_CLAUSE_ON_THE_QUERY_PATH[shape])
+
+    offenders = _scan(
+        tmp_path, _interpolated_literal_offenders, files=_query_path_files(tmp_path)
+    )
+
+    assert offenders == [], f"the guard flagged {shape}"
 
 
 def test_the_interpolation_guard_reads_only_the_modules_that_can_query_qbo():
