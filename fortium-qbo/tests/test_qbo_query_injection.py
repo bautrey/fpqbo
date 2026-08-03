@@ -296,6 +296,22 @@ def test_a_caller_supplied_field_name_is_refused():
         string_equals("DocNumber = '1' OR DocNumber", "x")
 
 
+# ---------------------------------------------------------------------------
+# The recurrence guards
+#
+# Two AST walks over the app tree, with different blind spots on purpose.
+#
+# The call-site guard knows what a clause is *for* — it only looks at the
+# arguments of a query call — and has to work to find out where the string
+# came from. The interpolation guard knows how a string is *built* and does
+# not care what it is for, so it sees helpers that hand their result back to
+# a caller in another function, and pays for that with a narrower file set.
+#
+# Neither is a taint analysis. What they are is two cheap properties that
+# between them cover every spelling of the original defect, with the shapes
+# they do not cover written down rather than assumed away.
+# ---------------------------------------------------------------------------
+
 APP_ROOT = pathlib.Path(__file__).resolve().parent.parent / "app"
 
 # The SDK builds its own clauses by string formatting, and escapes a quote but
@@ -305,27 +321,192 @@ FORBIDDEN_SDK_HELPERS = {"build_where_clause", "build_choose_clause"}
 
 QUERY_METHODS = {"where", "count", "filter", "choose", "query"}
 
+# Both `+` and `%` build a string out of a constant and a value. `*` and the
+# rest cannot, so they are arithmetic and are left alone.
+_FORMATTING_OPS = (ast.Add, ast.Mod)
 
-def _formatted_string_nodes(tree):
-    """Yield (node, arg) for every query call whose clause is built by formatting."""
-    for node in ast.walk(tree):
+# A local bound to a string that nothing has formatted yet. Tracked because
+# `clause = "DocNumber = '"` followed by `clause += doc` is the same defect
+# spelled across two statements.
+_UNFORMATTED = "string constant"
+
+
+def _operands(node):
+    """Flatten a chain of ``+``/``%`` into the operands it joins.
+
+    ``"DocNumber = '" + doc + "'"`` parses as ``BinOp(BinOp(str, doc), str)``,
+    so a check that reads ``node.left`` finds a BinOp there, not a constant,
+    and falls through. That is not a corner case: it is the plainest way to
+    write the defect, and it is why this returns a flat list instead.
+    """
+    if isinstance(node, ast.BinOp) and isinstance(node.op, _FORMATTING_OPS):
+        return _operands(node.left) + _operands(node.right)
+    return [node]
+
+
+def _constant_text(node) -> str | None:
+    """The text of ``node`` when it is a string constant, else None."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _is_unformatted_string(node, bindings) -> bool:
+    """True for a string constant, or a name holding one."""
+    if _constant_text(node) is not None:
+        return True
+    return isinstance(node, ast.Name) and bindings.get(node.id) == _UNFORMATTED
+
+
+def _formatting_kind(node, bindings) -> str | None:
+    """Name the formatting that builds ``node``, or None when nothing does.
+
+    ``bindings`` maps names bound earlier in this scope, or in an enclosing
+    one, to the kind of string they hold — without it, a clause built into a
+    local one line above the query call is invisible.
+    """
+    if isinstance(node, ast.JoinedStr):
+        return "f-string"
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"format", "format_map"}
+    ):
+        return ".format()"
+    if isinstance(node, ast.Name):
+        kind = bindings.get(node.id)
+        if kind is None or kind == _UNFORMATTED:
+            return None
+        return f"{kind}, bound to {node.id!r}"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, _FORMATTING_OPS):
+        operands = _operands(node)
+        inherited = next(
+            (kind for kind in (_formatting_kind(o, bindings) for o in operands) if kind),
+            None,
+        )
+        if inherited:
+            return f"concatenation of a {inherited}"
+        text = [o for o in operands if _is_unformatted_string(o, bindings)]
+        values = [o for o in operands if not _is_unformatted_string(o, bindings)]
+        # Text joined to something that is not text. `offset + 1` has no text
+        # in it and is arithmetic; `"a" + "b"` has no value in it and is one
+        # constant written twice.
+        if text and values:
+            return "% / + concatenation"
+    return None
+
+
+def _binding_kind(value, bindings) -> str | None:
+    """What a name bound to ``value`` would be holding."""
+    kind = _formatting_kind(value, bindings)
+    if kind:
+        return kind
+    return _UNFORMATTED if _is_unformatted_string(value, bindings) else None
+
+
+def _assignments(node):
+    """Yield (name, value) for every binding of a plain local name."""
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                yield target.id, node.value
+    elif isinstance(node, ast.AnnAssign):
+        if isinstance(node.target, ast.Name) and node.value is not None:
+            yield node.target.id, node.value
+    elif isinstance(node, ast.NamedExpr):
+        if isinstance(node.target, ast.Name):
+            yield node.target.id, node.value
+    elif isinstance(node, ast.AugAssign):
+        if isinstance(node.target, ast.Name):
+            # `clause += value` binds what `clause = clause + value` would.
+            yield (
+                node.target.id,
+                ast.BinOp(
+                    left=ast.Name(id=node.target.id, ctx=ast.Load()),
+                    op=node.op,
+                    right=node.value,
+                ),
+            )
+
+
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+# The binding pass is flow-insensitive and visits statements in whatever order
+# the walk produces, so `a = f"..."` may be seen after `b = a`. Repeating it
+# until it stops changing settles those chains; four passes is well past what
+# any of them need and keeps a pathological file from looping.
+_BINDING_PASSES = 4
+
+
+def _split_scope(scope):
+    """Split ``scope`` into (its own nodes, the scopes nested directly in it)."""
+    body = scope.body if isinstance(scope.body, list) else [scope.body]
+    own, nested, stack = [], [], list(body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _SCOPE_NODES):
+            nested.append(node)
+            continue
+        own.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    return own, nested
+
+
+def _bindings_in(nodes, inherited):
+    bindings = dict(inherited)
+    for _ in range(_BINDING_PASSES):
+        before = dict(bindings)
+        for node in nodes:
+            for name, value in _assignments(node):
+                kind = _binding_kind(value, bindings)
+                if kind is None:
+                    continue
+                # A name that has held a formatted string once keeps that
+                # mark. Letting a later plain assignment clear it would make
+                # the answer depend on the order the walk happened to visit
+                # the statements in, and `clause = "DocNumber = '"` followed
+                # by `clause += doc` reads in exactly the order that clears it.
+                held = bindings.get(name)
+                if kind == _UNFORMATTED and held not in (None, _UNFORMATTED):
+                    continue
+                bindings[name] = kind
+        if bindings == before:
+            break
+    return bindings
+
+
+def _query_clause_offenders(scope, inherited=None):
+    """Yield (lineno, how) for every query call handed a formatted clause."""
+    own, nested = _split_scope(scope)
+    bindings = _bindings_in(own, inherited or {})
+    for node in own:
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         if node.func.attr not in QUERY_METHODS:
             continue
-        args = list(node.args) + [kw.value for kw in node.keywords]
-        for arg in args:
-            if isinstance(arg, ast.JoinedStr):
-                yield node, "f-string"
-            elif isinstance(arg, ast.BinOp) and isinstance(arg.op, (ast.Mod, ast.Add)):
-                if isinstance(arg.left, (ast.Constant, ast.JoinedStr)):
-                    yield node, "% / + concatenation"
-            elif (
-                isinstance(arg, ast.Call)
-                and isinstance(arg.func, ast.Attribute)
-                and arg.func.attr == "format"
-            ):
-                yield node, ".format()"
+        for arg in [*node.args, *(kw.value for kw in node.keywords)]:
+            how = _formatting_kind(arg, bindings)
+            if how:
+                yield node.lineno, how
+    for child in nested:
+        # A nested def reads the enclosing locals, and that is exactly the
+        # shape the service uses: the clause is built, then a closure hands it
+        # to the SDK inside `_to_thread_with_retry`.
+        yield from _query_clause_offenders(child, bindings)
+
+
+def _offenders_in_tree(tree, finder):
+    return sorted(set(finder(tree)))
+
+
+def _scan(root, finder, files=None):
+    """Run ``finder`` over ``files`` (default: every .py under ``root``)."""
+    offenders = []
+    for path in sorted(root.rglob("*.py") if files is None else files):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for lineno, how in _offenders_in_tree(tree, finder):
+            offenders.append(f"{path.relative_to(root.parent)}:{lineno} ({how})")
+    return offenders
 
 
 def test_no_query_clause_anywhere_in_the_app_is_built_by_string_formatting():
@@ -336,31 +517,278 @@ def test_no_query_clause_anywhere_in_the_app_is_built_by_string_formatting():
     test is that no query clause is formatted at its call site at all —
     every one of them goes through app.utils.qbo_query.
     """
-    offenders = []
-    for path in sorted(APP_ROOT.rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node, how in _formatted_string_nodes(tree):
-            offenders.append(f"{path.relative_to(APP_ROOT.parent)}:{node.lineno} ({how})")
+    offenders = _scan(APP_ROOT, _query_clause_offenders)
 
     assert offenders == [], "query clauses built by string formatting: " + ", ".join(
         offenders
     )
 
 
-def test_the_qbo_date_clause_does_not_interpolate_into_a_quoted_literal():
-    """``_txn_date_clause`` builds into a local, so the AST walk above cannot
-    see it. Its source is checked directly instead."""
-    source = (APP_ROOT / "services" / "qbo_service.py").read_text()
-    tree = ast.parse(source)
+# ---------------------------------------------------------------------------
+# The call-site guard, against the shapes it has to catch
+#
+# These are fixtures rather than files under app/ because a file under app/ is
+# a file someone can import. They are parsed by the same function that reads
+# the real tree, so the guard cannot be narrowed without one of them going
+# green.
+# ---------------------------------------------------------------------------
+
+VIOLATING_CALL_SITES = {
+    "f-string": """
+Invoice.where(f"DocNumber = '{doc}'", qb=client)
+""",
+    "keyword f-string": """
+Invoice.where(clause=f"DocNumber = '{doc}'", qb=client)
+""",
+    ".format()": """
+Invoice.where("DocNumber = '{}'".format(doc), qb=client)
+""",
+    "% formatting": """
+Invoice.where("DocNumber = '%s'" % doc, qb=client)
+""",
+    # The reviewer's probe. The old guard read `arg.left` and found a BinOp
+    # rather than a constant here, so this passed it.
+    "concatenation of three operands": """
+def _new_lookup_clause(entity, client, doc_number):
+    return entity.where("DocNumber = '" + doc_number + "'", qb=client)
+""",
+    "concatenation of two operands": """
+Invoice.where("DocNumber = '" + doc, qb=client)
+""",
+    # The shape of the original `_txn_date_clause` defect: formatted into a
+    # local, then handed over. The old guard looked at the call site only.
+    "assign then pass": """
+clause = f"DocNumber = '{doc}'"
+Invoice.where(clause, qb=client)
+""",
+    "assign then pass, concatenated": """
+def lookup(doc):
+    clause = "DocNumber = '" + doc + "'"
+    return Invoice.where(clause, qb=client)
+""",
+    "built up in place": """
+def lookup(doc):
+    clause = "DocNumber = '"
+    clause += doc + "'"
+    return Invoice.where(clause, qb=client)
+""",
+    "passed through a second local": """
+def lookup(doc):
+    built = f"DocNumber = '{doc}'"
+    clause = built
+    return Invoice.where(clause, qb=client)
+""",
+    # The service builds its clause and then hands it to the SDK from inside a
+    # closure, so the guard has to follow a name into a nested def.
+    "used from a closure": """
+def lookup(doc):
+    clause = f"DocNumber = '{doc}'"
+
+    def _fetch():
+        return Invoice.where(clause, qb=client)
+
+    return _fetch()
+""",
+}
+
+CLEAN_CALL_SITES = {
+    "the helper": """
+Invoice.where(string_equals("DocNumber", doc), qb=client)
+""",
+    # `start_position=offset + 1` is arithmetic in a query call's keyword. A
+    # guard that flags it is a guard someone deletes.
+    "arithmetic in a keyword": """
+entity.where(
+    clause or "",
+    order_by=QBO_PAGE_ORDER_BY,
+    start_position=offset + 1,
+    max_results=limit,
+    qb=client,
+)
+""",
+    "sqlalchemy": """
+db.query(QboCompany).filter(QboCompany.id == company_id).first()
+""",
+    "a formatted string that is not the clause": """
+def lookup(doc):
+    message = f"Invoice '{doc}' not found"
+    rows = Invoice.where(string_equals("DocNumber", doc), qb=client)
+    if not rows:
+        raise ValueError(message)
+    return rows[0]
+""",
+    "two constants": """
+Invoice.where("DocNumber = '1'" " AND Balance > '0'", qb=client)
+""",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(VIOLATING_CALL_SITES))
+def test_the_call_site_guard_catches_every_way_of_formatting_a_clause(shape):
+    tree = ast.parse(VIOLATING_CALL_SITES[shape])
+
+    assert _offenders_in_tree(tree, _query_clause_offenders), (
+        f"a clause built by {shape} passed the guard"
+    )
+
+
+@pytest.mark.parametrize("shape", sorted(CLEAN_CALL_SITES))
+def test_the_call_site_guard_leaves_the_legitimate_shapes_alone(shape):
+    """False positives are how a guard gets deleted."""
+    tree = ast.parse(CLEAN_CALL_SITES[shape])
+
+    assert _offenders_in_tree(tree, _query_clause_offenders) == [], (
+        f"the guard flagged {shape}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The interpolation guard — every module that can build a QBO query
+# ---------------------------------------------------------------------------
+
+# A module that imports the SDK can hand a string to QBO; a module that
+# imports the clause helpers is on the same path by construction. This is the
+# capability, not a list of file names, so a new service module is covered the
+# day it is written.
+_QUERY_PATH_IMPORTS = ("quickbooks", "app.utils.qbo_query")
+
+
+def _imported_modules(tree):
     for node in ast.walk(tree):
-        if not isinstance(node, ast.JoinedStr):
+        if isinstance(node, ast.Import):
+            yield from (alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            yield node.module or ""
+
+
+def _is_on_the_query_path(tree) -> bool:
+    return any(
+        name == root or name.startswith(f"{root}.")
+        for name in _imported_modules(tree)
+        for root in _QUERY_PATH_IMPORTS
+    )
+
+
+def _query_path_files(root):
+    """The modules under ``root`` that can put a string into a QBO query.
+
+    ``app/utils/qbo_query.py`` is excluded: quoting values is the one thing it
+    exists to do, and its literals are covered by the unit tests above. It is
+    the sanitiser, so it is the one file the taint check must not read.
+    """
+    builder = root / "utils" / "qbo_query.py"
+    for path in sorted(root.rglob("*.py")):
+        if path == builder:
             continue
-        rendered = "".join(
-            part.value for part in node.values if isinstance(part, ast.Constant)
-        )
-        assert "'" not in rendered, (
-            f"qbo_service.py:{node.lineno} interpolates into a quoted literal"
-        )
+        if _is_on_the_query_path(ast.parse(path.read_text(), filename=str(path))):
+            yield path
+
+
+def _interpolated_literal_offenders(tree):
+    """Yield (lineno, how) for a value formatted into a quoted literal.
+
+    The clause is a value's only container. A string built by putting
+    something between two ``'`` is either a QBO literal or it is a sentence
+    that reads like one, and on the query path the difference is not worth
+    guessing at.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            has_value = any(isinstance(p, ast.FormattedValue) for p in node.values)
+            text = "".join(
+                p.value for p in node.values if isinstance(p, ast.Constant)
+            )
+            if has_value and "'" in text:
+                yield node.lineno, "f-string into a quoted literal"
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, _FORMATTING_OPS):
+            operands = _operands(node)
+            text = [t for t in map(_constant_text, operands) if t is not None]
+            values = [o for o in operands if _constant_text(o) is None]
+            if text and values and any("'" in t for t in text):
+                yield node.lineno, "concatenation into a quoted literal"
+
+
+def test_no_module_on_the_query_path_interpolates_into_a_quoted_literal():
+    """The second guard, and the one that carries the shapes the first cannot.
+
+    ``_txn_date_clause`` builds its clause and returns it — the call-site
+    guard follows a name within a function and into the closures inside it,
+    but not out through a return into another module. This one does not care
+    who the caller is: on the query path, a value between two quotes is a
+    clause being built by hand, wherever it happens.
+    """
+    offenders = _scan(
+        APP_ROOT, _interpolated_literal_offenders, files=_query_path_files(APP_ROOT)
+    )
+
+    assert offenders == [], "values interpolated into quoted literals: " + ", ".join(
+        offenders
+    )
+
+
+def _plant(tmp_path, name, source):
+    path = tmp_path / name
+    path.write_text(source)
+    return path
+
+
+REINTRODUCED_IN_A_NEW_MODULE = '''
+"""A new service module, written next year, that does not use the helper."""
+
+from quickbooks.objects.invoice import Invoice
+
+
+def lookup_clause(doc_number):
+    return f"DocNumber = '{doc_number}'"
+'''
+
+REINTRODUCED_BY_CONCATENATION = '''
+from quickbooks.objects.invoice import Invoice
+
+
+def lookup_clause(doc_number):
+    return "DocNumber = '" + doc_number + "'"
+'''
+
+
+@pytest.mark.parametrize(
+    "source", [REINTRODUCED_IN_A_NEW_MODULE, REINTRODUCED_BY_CONCATENATION]
+)
+def test_the_interpolation_guard_reads_more_than_one_file(tmp_path, source):
+    """The defect does not have to come back to the file it left.
+
+    This guard used to read ``services/qbo_service.py`` and nothing else, so a
+    new module was free to build its clauses the old way.
+    """
+    _plant(tmp_path, "new_service.py", source)
+
+    offenders = _scan(
+        tmp_path, _interpolated_literal_offenders, files=_query_path_files(tmp_path)
+    )
+
+    assert offenders, "a clause built in a new module was not read at all"
+
+
+def test_the_interpolation_guard_reads_only_the_modules_that_can_query_qbo():
+    """The boundary, pinned deliberately.
+
+    Run over every file under app/, this guard flags four legitimate strings —
+    ``Invoice with DocNumber '{doc_number}' not found``, ``Must be 'US' or
+    'CA'``, a sentence containing ``QuickBooks'``, and the helper module's own
+    literals. None is a query. A guard that reports those is a guard that gets
+    deleted the third time it fails a build, so it reads the modules that
+    import the SDK or the clause helpers, and no others.
+
+    The cost is written down rather than assumed: a module that builds clause
+    text and imports neither is not read here, and is caught only if it hands
+    the result to a query call in the same function, where the call-site guard
+    can see it.
+    """
+    scanned = set(_query_path_files(APP_ROOT))
+
+    assert APP_ROOT / "services" / "qbo_service.py" in scanned
+    assert APP_ROOT / "utils" / "qbo_query.py" not in scanned
+    assert APP_ROOT / "routers" / "invoices.py" not in scanned
 
 
 def test_the_service_does_not_reach_for_the_sdk_clause_builders():
