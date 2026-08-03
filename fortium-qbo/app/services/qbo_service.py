@@ -63,6 +63,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.qbo_company import QboCompany
+from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,12 @@ TOKEN_REFRESH_BUFFER = timedelta(minutes=5)
 # 1 initial attempt + 2 retries, backing off 1s then 2s.
 QBO_RETRY_ATTEMPTS = 3
 QBO_RETRY_BACKOFF_SECONDS = (1, 2)
+
+# Page budget for the endpoints that aggregate server-side and therefore have
+# to read the whole result set. 20 pages is 20,000 rows — comfortably past the
+# ~27,000-row bill ledger's largest realistic window and small enough that a
+# runaway query cannot sit on a QBO connection indefinitely.
+QBO_MAX_PAGES_PER_WALK = 20
 
 # Raw transport-level errors that indicate a transient network blip rather
 # than a deterministic client error. The SDK transports over `requests`
@@ -367,6 +374,136 @@ class QBOService:
         return await self._with_retry(lambda: asyncio.to_thread(fn), op=op)
 
     # -------------------------------------------------------------------------
+    # Result paging
+    #
+    # QBO answers a query with at most QBO_MAX_PAGE_SIZE rows no matter what
+    # MAXRESULTS asks for, so a list endpoint cannot return a complete set by
+    # raising a limit — it pages with STARTPOSITION, and it has to say when a
+    # page is not the whole answer.
+    # -------------------------------------------------------------------------
+
+    async def _query_page(
+        self,
+        entity,
+        *,
+        client,
+        clause: str | None,
+        offset: int,
+        limit: int,
+        op: str,
+    ) -> list[dict[str, Any]]:
+        """Run one QBO query and return its rows as dicts."""
+
+        def _fetch():
+            # QBO's STARTPOSITION is 1-based; `offset` is 0-based on the wire.
+            start_position = offset + 1
+            if clause:
+                return entity.where(
+                    clause,
+                    start_position=start_position,
+                    max_results=limit,
+                    qb=client,
+                )
+            return entity.all(
+                start_position=start_position, max_results=limit, qb=client
+            )
+
+        objects = await self._to_thread_with_retry(_fetch, op=op)
+        return [obj.to_dict() for obj in objects]
+
+    async def _count_matching(
+        self, entity, *, client, clause: str | None, op: str
+    ) -> int | None:
+        """Count the rows a query matches in QBO, across all pages.
+
+        Returns None when QBO answers without a `totalCount`; callers treat
+        that as "size unknown", never as "complete".
+        """
+
+        def _count():
+            return entity.count(clause or "", qb=client)
+
+        return await self._to_thread_with_retry(_count, op=f"{op}_count")
+
+    async def _fetch_page(
+        self,
+        entity,
+        *,
+        client,
+        clause: str | None,
+        offset: int,
+        limit: int,
+        op: str,
+    ) -> PagedResult:
+        """Fetch one page and establish whether it is the whole result set.
+
+        A short page ends the result set, so `offset + len(rows)` is the total
+        and the COUNT round trip is skipped. A full page is ambiguous — it is
+        equally the last page of an exactly-divisible set and the first of
+        many — and that ambiguity is precisely what used to be resolved
+        wrongly in silence, so it costs one COUNT query to resolve it.
+
+        An empty page past the first is the one short page that proves
+        nothing: QBO answers a STARTPOSITION beyond the end with no rows, so
+        `offset` there is a number the caller chose rather than the size of
+        anything. That case is counted rather than inferred.
+        """
+        rows = await self._query_page(
+            entity, client=client, clause=clause, offset=offset, limit=limit, op=op
+        )
+        overshot = not rows and offset > 0
+        if len(rows) < limit and not overshot:
+            return PagedResult(
+                rows=rows, offset=offset, total=offset + len(rows), has_more=False
+            )
+
+        total = await self._count_matching(entity, client=client, clause=clause, op=op)
+        if overshot:
+            return PagedResult(rows=rows, offset=offset, total=total, has_more=False)
+
+        has_more = total is None or total > offset + len(rows)
+        return PagedResult(rows=rows, offset=offset, total=total, has_more=has_more)
+
+    async def _fetch_all_pages(
+        self,
+        entity,
+        *,
+        client,
+        clause: str | None,
+        op: str,
+        max_pages: int = QBO_MAX_PAGES_PER_WALK,
+    ) -> PagedResult:
+        """Walk every page of a query, for endpoints that aggregate server-side.
+
+        An aggregate computed over a truncated slice is a wrong number wearing
+        a 200, so these walk to the end. The page budget bounds the walk at
+        `max_pages * QBO_MAX_PAGE_SIZE` rows; exhausting it returns what was
+        collected with `has_more` true rather than passing a prefix off as the
+        whole ledger.
+        """
+        rows: list[dict[str, Any]] = []
+        for _ in range(max_pages):
+            page = await self._query_page(
+                entity,
+                client=client,
+                clause=clause,
+                offset=len(rows),
+                limit=QBO_MAX_PAGE_SIZE,
+                op=op,
+            )
+            rows.extend(page)
+            if len(page) < QBO_MAX_PAGE_SIZE:
+                return PagedResult(rows=rows, offset=0, total=len(rows), has_more=False)
+
+        total = await self._count_matching(entity, client=client, clause=clause, op=op)
+        return PagedResult(
+            rows=rows,
+            offset=0,
+            total=total,
+            has_more=total is None or total > len(rows),
+        )
+
+    # -------------------------------------------------------------------------
     # Entity Methods (async via to_thread)
     # -------------------------------------------------------------------------
 
@@ -375,20 +512,36 @@ class QBOService:
         company_id: int,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
-        max_results: int = 1000,
-    ) -> list[dict[str, Any]]:
-        """Get invoices, optionally filtered by date range."""
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of invoices, optionally filtered by date range."""
         company = self._get_company(company_id)
         client = self._get_client(company)
+        return await self._fetch_page(
+            Invoice,
+            client=client,
+            clause=_txn_date_clause(start_date, end_date),
+            offset=offset,
+            limit=max_results,
+            op="get_invoices",
+        )
 
-        def _fetch():
-            clause = _txn_date_clause(start_date, end_date)
-            if clause:
-                return Invoice.where(clause, max_results=max_results, qb=client)
-            return Invoice.all(max_results=max_results, qb=client)
-
-        invoices = await self._to_thread_with_retry(_fetch, op="get_invoices")
-        return [inv.to_dict() for inv in invoices]
+    async def get_all_invoices(
+        self,
+        company_id: int,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> PagedResult:
+        """Get every invoice in a date range, paging until QBO runs out."""
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+        return await self._fetch_all_pages(
+            Invoice,
+            client=client,
+            clause=_txn_date_clause(start_date, end_date),
+            op="get_all_invoices",
+        )
 
     async def get_invoice_by_id(
         self, company_id: int, invoice_id: int
@@ -778,20 +931,20 @@ class QBOService:
         company_id: int,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
-        max_results: int = 1000,
-    ) -> list[dict[str, Any]]:
-        """Get bills, optionally filtered by date range."""
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of bills, optionally filtered by date range."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            clause = _txn_date_clause(start_date, end_date)
-            if clause:
-                return Bill.where(clause, max_results=max_results, qb=client)
-            return Bill.all(max_results=max_results, qb=client)
-
-        bills = await self._to_thread_with_retry(_fetch, op="get_bills")
-        return [b.to_dict() for b in bills]
+        return await self._fetch_page(
+            Bill,
+            client=client,
+            clause=_txn_date_clause(start_date, end_date),
+            offset=offset,
+            limit=max_results,
+            op="get_bills",
+        )
 
     async def get_bill_by_id(
         self, company_id: int, bill_id: int
@@ -965,20 +1118,20 @@ class QBOService:
         company_id: int,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
-        max_results: int = 1000,
-    ) -> list[dict[str, Any]]:
-        """Get payments, optionally filtered by date range."""
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of payments, optionally filtered by date range."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            clause = _txn_date_clause(start_date, end_date)
-            if clause:
-                return Payment.where(clause, max_results=max_results, qb=client)
-            return Payment.all(max_results=max_results, qb=client)
-
-        payments = await self._to_thread_with_retry(_fetch, op="get_payments")
-        return [p.to_dict() for p in payments]
+        return await self._fetch_page(
+            Payment,
+            client=client,
+            clause=_txn_date_clause(start_date, end_date),
+            offset=offset,
+            limit=max_results,
+            op="get_payments",
+        )
 
     async def get_payment_by_id(
         self, company_id: int, payment_id: int
@@ -1369,20 +1522,20 @@ class QBOService:
         company_id: int,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
-        max_results: int = 1000,
-    ) -> list[dict[str, Any]]:
-        """Get purchases, optionally filtered by date range."""
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of purchases, optionally filtered by date range."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            clause = _txn_date_clause(start_date, end_date)
-            if clause:
-                return Purchase.where(clause, max_results=max_results, qb=client)
-            return Purchase.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_purchases")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            Purchase,
+            client=client,
+            clause=_txn_date_clause(start_date, end_date),
+            offset=offset,
+            limit=max_results,
+            op="get_purchases",
+        )
 
     async def get_purchase_by_id(
         self, company_id: int, entity_id: int

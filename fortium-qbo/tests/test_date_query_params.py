@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 from app.dependencies.api_auth import verify_api_key
 from app.routers import bills, invoices, payments, purchases, reports
 from app.services.qbo_service import QBOService, _txn_date_clause
+from app.utils.paging import PagedResult
 from app.utils.query_dates import parse_date_param
 
 # The shape Date.prototype.toISOString() emits — what the nightly gbrain
@@ -128,16 +129,18 @@ class Case(SimpleNamespace):
 
 # start_date/end_date endpoints. `passes_strings` marks the one endpoint whose
 # service takes pre-formatted strings rather than datetimes (general-ledger
-# hands its dates to QBO's report API as-is).
+# hands its dates to QBO's report API as-is). The four transaction endpoints
+# take a page from their service rather than a bare list — see
+# tests/test_result_paging.py.
 RANGE_CASES = [
     Case(id="bills", module=bills, path="/bills/", method="get_bills",
-         result=[], required=False, passes_strings=False),
+         result=PagedResult(), required=False, passes_strings=False),
     Case(id="purchases", module=purchases, path="/purchases/", method="get_purchases",
-         result=[], required=False, passes_strings=False),
+         result=PagedResult(), required=False, passes_strings=False),
     Case(id="payments", module=payments, path="/payments/", method="get_payments",
-         result=[], required=False, passes_strings=False),
+         result=PagedResult(), required=False, passes_strings=False),
     Case(id="invoices", module=invoices, path="/invoices/", method="get_invoices",
-         result=[], required=False, passes_strings=False),
+         result=PagedResult(), required=False, passes_strings=False),
     Case(id="trial-balance", module=reports, path="/reports/trial-balance",
          method="get_trial_balance", result={}, required=False, passes_strings=False),
     Case(id="profit-and-loss", module=reports, path="/reports/profit-and-loss",
