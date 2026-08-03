@@ -141,40 +141,47 @@ async def get_trailing_12m_summary(
     that is a wrong dollar figure served as a clean 200. `complete` states
     whether the walk reached the end of the result set.
     """
-    try:
-        end_date = datetime.utcnow()
-        start_date = datetime(end_date.year - 1, end_date.month, 1)
+    end_date = datetime.utcnow()
+    start_date = datetime(end_date.year - 1, end_date.month, 1)
 
+    # Only the fetch is caught. The `except ValueError` below is the
+    # unknown-company signal from the service and is answered with a 404; with
+    # the aggregation inside the try, a TotalAmt QBO returned as something
+    # float() will not take was also a ValueError and also became a 404 —
+    # "no such company" to anything routing on the status code. The walk now
+    # reaches 20,000 invoices where it used to stop at 1,000, so there are
+    # twenty times as many values to trip over.
+    try:
         page = await qbo.get_all_invoices(
             company_id=company_id,
             start_date=start_date,
             end_date=end_date,
         )
-
-        # Aggregate by month
-        monthly_totals: dict[str, dict[str, Any]] = {}
-        for inv in page.rows:
-            txn_date = inv.get("TxnDate", "")
-            if txn_date:
-                month_key = txn_date[:7]  # YYYY-MM
-                if month_key not in monthly_totals:
-                    monthly_totals[month_key] = {"total": 0.0, "count": 0}
-                monthly_totals[month_key]["total"] += float(inv.get("TotalAmt", 0))
-                monthly_totals[month_key]["count"] += 1
-
-        return {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "monthly_totals": dict(sorted(monthly_totals.items())),
-            "grand_total": sum(m["total"] for m in monthly_totals.values()),
-            "total_invoices": sum(m["count"] for m in monthly_totals.values()),
-            # False when the page budget ran out before the result set did, so
-            # a partial aggregate is never read as the whole year.
-            "complete": not page.has_more,
-            "invoices_in_window": page.total,
-            "fetched_at": datetime.utcnow().isoformat(),
-        }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+    # Aggregate by month
+    monthly_totals: dict[str, dict[str, Any]] = {}
+    for inv in page.rows:
+        txn_date = inv.get("TxnDate", "")
+        if txn_date:
+            month_key = txn_date[:7]  # YYYY-MM
+            if month_key not in monthly_totals:
+                monthly_totals[month_key] = {"total": 0.0, "count": 0}
+            monthly_totals[month_key]["total"] += float(inv.get("TotalAmt", 0))
+            monthly_totals[month_key]["count"] += 1
+
+    return {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "monthly_totals": dict(sorted(monthly_totals.items())),
+        "grand_total": sum(m["total"] for m in monthly_totals.values()),
+        "total_invoices": sum(m["count"] for m in monthly_totals.values()),
+        # False when the page budget ran out before the result set did, so
+        # a partial aggregate is never read as the whole year.
+        "complete": not page.has_more,
+        "invoices_in_window": page.total,
+        "fetched_at": datetime.utcnow().isoformat(),
+    }

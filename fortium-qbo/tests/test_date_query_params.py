@@ -439,10 +439,16 @@ def test_service_applies_the_date_window_to_the_qbo_query(monkeypatch, attr, met
     ],
 )
 def test_service_fetches_everything_when_no_window_is_given(monkeypatch, attr, method):
+    """No window means no TxnDate predicate — an empty clause, not a filter.
+
+    The query still goes through where(): every paged read does, so that one
+    ORDERBY spelling reaches QuickBooks instead of the two the SDK's where()
+    and all() emit.
+    """
     recorder = _EntityRecorder()
     svc = _service_with_entity(monkeypatch, attr, recorder)
 
     asyncio.run(getattr(svc, method)(company_id=1))
 
-    assert recorder.all_called
-    assert recorder.where_clause is None
+    assert recorder.all_called is False
+    assert recorder.where_clause == ""

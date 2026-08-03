@@ -66,9 +66,19 @@ class PagedResult:
         total: How many rows the query matches in QBO — not how many are in
             ``rows``. None only when QBO answered the COUNT query without a
             ``totalCount``, which leaves the size of the result set genuinely
-            unknown; ``has_more`` is True in that case so an unknown can never
-            be read as complete.
-        has_more: True when rows exist past this page.
+            unknown.
+        has_more: True when rows exist past this page. It is False only where
+            something proves the end: a page shorter than the limit, or an
+            empty page past offset 0, which is QBO's answer to a STARTPOSITION
+            beyond the end of the result set. Everywhere else an unknown size
+            (``total`` None) forces it True, so a partial answer is never read
+            as complete.
+
+    Size and completeness are separate facts and an empty page past offset 0
+    is where they come apart: the page proves no row exists at or past that
+    offset, so ``has_more`` is False, while an unanswered COUNT leaves
+    ``total`` None. That combination is a complete result set of unknown size,
+    not a claim made without evidence.
     """
 
     rows: list[dict[str, Any]] = field(default_factory=list)
@@ -106,8 +116,10 @@ PAGING_RESPONSE_HEADERS: dict[str, dict[str, Any]] = {
     HEADER_TOTAL_COUNT: {
         "description": (
             "Rows matching this query in QuickBooks, across all pages. Absent "
-            "only when QuickBooks did not answer the count, in which case "
-            "X-Has-More is true because completeness is unknown."
+            "only when QuickBooks did not answer the count, which leaves the "
+            "size unknown. Read X-Has-More for completeness — it is 'true' "
+            "whenever the size is unknown, except on an empty page past "
+            "offset 0, where the empty page itself proves the end."
         ),
         "schema": {"type": "integer"},
     },

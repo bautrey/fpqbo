@@ -11,6 +11,7 @@ from intuitlib.client import AuthClient
 from intuitlib.enums import Scopes
 from quickbooks import QuickBooks
 from quickbooks.exceptions import (
+    ObjectNotFoundException,
     QuickbooksException,
     SevereException,
     UnsupportedException,
@@ -59,6 +60,7 @@ from quickbooks.objects.trackingclass import Class as TrackingClass
 from quickbooks.objects.transfer import Transfer
 from quickbooks.objects.vendor import Vendor
 from quickbooks.objects.vendorcredit import VendorCredit
+from quickbooks.utils import build_choose_clause
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -84,6 +86,18 @@ QBO_RETRY_BACKOFF_SECONDS = (1, 2)
 # ~27,000-row bill ledger's largest realistic window and small enough that a
 # runaway query cannot sit on a QBO connection indefinitely.
 QBO_MAX_PAGES_PER_WALK = 20
+
+# Sort key every paged query is ordered by. STARTPOSITION indexes into an
+# ordering, so the ordering has to be one where a row written during a walk
+# cannot land in front of the cursor. Id is ascending and assigned at creation;
+# QBO's default order is neither Id nor TxnDate and is not documented at all.
+QBO_PAGE_ORDER_BY = "Id"
+
+# QBO writes the payment side of a bill/payment link onto the bill as a
+# LinkedTxn whose TxnType is BillPaymentCheck or BillPaymentCreditCard. A bill
+# also links to PurchaseOrders, VendorCredits and ReimburseCharges, which are
+# not payments, so the type is matched rather than assumed.
+BILL_PAYMENT_LINK_PREFIX = "BillPayment"
 
 # Raw transport-level errors that indicate a transient network blip rather
 # than a deterministic client error. The SDK transports over `requests`
@@ -392,20 +406,39 @@ class QBOService:
         limit: int,
         op: str,
     ) -> list[dict[str, Any]]:
-        """Run one QBO query and return its rows as dicts."""
+        """Run one QBO query, ordered by Id, and return its rows as dicts.
+
+        The ordering is load-bearing. QBO's default order is neither Id nor
+        TxnDate — an unfiltered invoice query answers 94670, 93743, 94659,
+        94679, 94678 — and STARTPOSITION indexes into whatever that order is.
+        It is stable for a set nothing is writing to, which is why a walk looks
+        correct in a quiet moment, but a row inserted mid-walk lands wherever
+        that undocumented order puts it. Land it before the cursor and one row
+        shifts across the page boundary: returned twice, or never returned at
+        all. A walk of the bill ledger is ~28 pages and several minutes against
+        a live AP ledger, and `/invoices/trailing-12m/summary` sums TotalAmt
+        across its walk, so the skew reads as a wrong dollar figure inside a
+        `complete: true` response — the same defect class this paging exists to
+        remove. Ordering by an ascending Id puts every insert past the cursor,
+        where it can neither duplicate nor skip a row.
+
+        Both the filtered and unfiltered cases go through `where()` so exactly
+        one ORDERBY spelling is ever sent. The SDK is internally inconsistent
+        about it — `ListMixin.where()` emits ` ORDERBY `, `ListMixin.all()`
+        emits ` ORDER BY ` — and splitting on `clause` would put two query
+        dialects into production, one per code path. `where("")` builds the
+        same SELECT `all()` would, minus an Item/Sku special case that no
+        entity on this path uses (Bill, Invoice, Payment, Purchase).
+        """
 
         def _fetch():
             # QBO's STARTPOSITION is 1-based; `offset` is 0-based on the wire.
-            start_position = offset + 1
-            if clause:
-                return entity.where(
-                    clause,
-                    start_position=start_position,
-                    max_results=limit,
-                    qb=client,
-                )
-            return entity.all(
-                start_position=start_position, max_results=limit, qb=client
+            return entity.where(
+                clause or "",
+                order_by=QBO_PAGE_ORDER_BY,
+                start_position=offset + 1,
+                max_results=limit,
+                qb=client,
             )
 
         objects = await self._to_thread_with_retry(_fetch, op=op)
@@ -443,10 +476,13 @@ class QBOService:
         many — and that ambiguity is precisely what used to be resolved
         wrongly in silence, so it costs one COUNT query to resolve it.
 
-        An empty page past the first is the one short page that proves
-        nothing: QBO answers a STARTPOSITION beyond the end with no rows, so
-        `offset` there is a number the caller chose rather than the size of
-        anything. That case is counted rather than inferred.
+        An empty page past the first proves the end of the result set — QBO
+        answers a STARTPOSITION beyond the end with no rows — but it does not
+        establish the size, because `offset` there is a number the caller chose
+        rather than the count of anything. So `has_more` is False on the
+        evidence of the empty page while `total` comes from a COUNT, and stays
+        None if QBO does not answer it. That is the one place the two facts
+        come from different sources.
         """
         rows = await self._query_page(
             entity, client=client, clause=clause, offset=offset, limit=limit, op=op
@@ -459,6 +495,12 @@ class QBOService:
 
         total = await self._count_matching(entity, client=client, clause=clause, op=op)
         if overshot:
+            # has_more stays False even when the COUNT went unanswered. The
+            # empty page is itself the proof that no row exists at or past this
+            # offset, so completeness here is established rather than inferred
+            # from `total`. Flipping it to True on `total is None` would claim
+            # rows exist past a page just proven empty, and hand back a
+            # next_offset of offset + 0 — a cursor that never advances.
             return PagedResult(rows=rows, offset=offset, total=total, has_more=False)
 
         has_more = total is None or total > offset + len(rows)
@@ -1177,30 +1219,68 @@ class QBOService:
     async def get_bill_payments_by_bill_id(
         self, company_id: int, bill_id: int
     ) -> list[dict[str, Any]]:
-        """Get bill payments linked to a specific bill.
+        """Get the bill payments linked to a specific bill.
 
-        QBO doesn't support filtering by LinkedTxn in queries,
-        so we fetch all and filter in Python.
+        Read the link off the bill, then fetch the payments it names. The bill
+        carries the payment side of the link — QBO writes a
+        `BillPaymentCheck` / `BillPaymentCreditCard` LinkedTxn onto the bill
+        when it is paid — so the payments are addressable by Id and this costs
+        two queries whatever the age of the bill.
+
+        It used to pull the first 1000 BillPayments in the ledger and filter
+        them in Python for a link back to the bill. That window was the most
+        recent few months, so a bill paid before it answered `[]` with a 200 —
+        the same answer as a bill that was never paid, to a question that is
+        usually asked as "has this been paid?". Measured against production on
+        2026-08-03: bill 64848 (2024-01-31, $25,000, Balance 0) returned no
+        payments, while its LinkedTxn named BillPayment 65852, whose own
+        LinkedTxn names bill 64848. Across twelve bills recent enough for the
+        old path to work, both routes returned the identical payment.
+
+        Walking the whole BillPayment ledger instead would be correct and
+        useless: ~27,000 rows is minutes per request for an answer two queries
+        give.
         """
         company = self._get_company(company_id)
         client = self._get_client(company)
-        bill_id_str = str(bill_id)
 
-        def _fetch():
-            all_payments = BillPayment.all(max_results=1000, qb=client)
-            matched = []
-            for bp in all_payments:
-                for line in bp.Line:
-                    for txn in line.LinkedTxn:
-                        if txn.TxnId == bill_id_str and txn.TxnType == "Bill":
-                            matched.append(bp)
-                            break
-                    else:
-                        continue
-                    break
-            return matched
+        def _read_bill():
+            return Bill.get(bill_id, qb=client)
 
-        items = await self._to_thread_with_retry(_fetch, op="get_bill_payments_by_bill_id")
+        try:
+            bill = await self._to_thread_with_retry(
+                _read_bill, op="get_bill_payments_by_bill_id_bill"
+            )
+        except ObjectNotFoundException as exc:
+            # 404, not 500: the caller named a bill that does not exist. Also
+            # not `[]` — that would read as "this bill has no payments".
+            raise ValueError(f"Bill not found: {bill_id}") from exc
+
+        payment_ids: list[str] = []
+        for txn in bill.LinkedTxn:
+            # BillPaymentCheck and BillPaymentCreditCard both appear here, as
+            # do PurchaseOrder / VendorCredit / ReimburseCharge links, which
+            # are not payments. str() because the SDK's LinkedTxn defaults
+            # TxnType to 0 for a link QBO sent without one.
+            if not str(txn.TxnType).startswith(BILL_PAYMENT_LINK_PREFIX):
+                continue
+            txn_id = str(txn.TxnId)
+            if txn_id not in payment_ids:
+                payment_ids.append(txn_id)
+
+        if not payment_ids:
+            return []
+
+        def _read_payments():
+            return BillPayment.where(
+                build_choose_clause(payment_ids, "Id"),
+                max_results=QBO_MAX_PAGE_SIZE,
+                qb=client,
+            )
+
+        items = await self._to_thread_with_retry(
+            _read_payments, op="get_bill_payments_by_bill_id"
+        )
         return [i.to_dict() for i in items]
 
     async def create_bill_payment(

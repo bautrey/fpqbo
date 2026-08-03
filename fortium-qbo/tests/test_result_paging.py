@@ -24,6 +24,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from quickbooks.mixins import ListMixin
+
 from app.dependencies.api_auth import verify_api_key
 from app.routers import bills, invoices, payments, purchases
 from app.services.qbo_service import QBOService
@@ -60,10 +62,11 @@ class _FakeEntity:
         self.queries: list[dict] = []
         self.count_calls: list[str] = []
 
-    def _slice(self, where_clause, start_position, max_results):
+    def _slice(self, where_clause, order_by, start_position, max_results):
         self.queries.append(
             {
                 "where": where_clause,
+                "order_by": order_by,
                 "start_position": start_position,
                 "max_results": max_results,
             }
@@ -72,11 +75,14 @@ class _FakeEntity:
         limit = min(int(max_results or PAGE), PAGE)
         return [_Row(i) for i in range(start, min(start + limit, self.ledger_size))]
 
-    def where(self, clause, start_position="", max_results="", qb=None):
-        return self._slice(clause, start_position, max_results)
+    def where(self, clause, order_by="", start_position="", max_results="", qb=None):
+        return self._slice(clause, order_by, start_position, max_results)
 
-    def all(self, start_position="", max_results="", qb=None):
-        return self._slice(None, start_position, max_results)
+    def all(self, order_by="", start_position="", max_results="", qb=None):
+        # The paged reads go through where() for every query, filtered or not,
+        # because the two SDK methods spell the ORDERBY clause differently and
+        # only one spelling should ever reach QuickBooks.
+        raise AssertionError("paged reads must not go through ListMixin.all()")
 
     def count(self, where_clause="", qb=None):
         self.count_calls.append(where_clause)
@@ -243,6 +249,31 @@ def test_an_offset_past_the_end_reports_the_real_total_not_the_offset(
 
 
 @pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
+def test_an_overshot_offset_is_the_end_even_when_the_count_goes_unanswered(
+    monkeypatch, attr, method
+):
+    """Size unknown and completeness unknown are different facts.
+
+    This is where they come apart, and it is the one branch where has_more is
+    False while total is None. The empty page is the evidence: QuickBooks
+    answers a STARTPOSITION past the end with no rows, so no row exists at or
+    past this offset whatever the COUNT did or did not say. Reporting
+    has_more=True on the unanswered count would claim rows exist past a page
+    just proven empty, and next_offset would come back as the same offset the
+    caller already sent — a cursor a paging loop never gets off.
+    """
+    entity = _CountlessEntity(ledger_size=27_187)
+    svc = _service(monkeypatch, attr, entity)
+
+    page = asyncio.run(getattr(svc, method)(company_id=1, offset=30_000))
+
+    assert page.rows == []
+    assert page.total is None
+    assert page.has_more is False
+    assert page.next_offset is None
+
+
+@pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
 def test_an_empty_first_page_is_an_empty_result_set_not_an_overshoot(
     monkeypatch, attr, method
 ):
@@ -313,6 +344,87 @@ def test_max_results_is_still_an_upper_bound_on_rows_returned(
     assert len(page.rows) == 1
     assert entity.queries[0]["max_results"] == 1
     assert page.has_more is True
+
+
+# ---------------------------------------------------------------------------
+# Service: the SQL that actually reaches QuickBooks
+#
+# STARTPOSITION indexes into an ordering, and the ordering QuickBooks picks
+# when nothing asks for one is neither Id nor TxnDate: an unfiltered invoice
+# query answers 94670, 93743, 94659, 94679, 94678. It is stable while nothing
+# is writing, so an unordered walk looks right in a quiet moment and skews
+# under concurrent writes — a row inserted ahead of the cursor pushes another
+# across a page boundary, and the walk returns it twice or not at all.
+#
+# These pin the emitted SQL rather than the kwargs because the SDK is what
+# chooses the spelling, and it is inconsistent about it: ListMixin.where()
+# writes " ORDERBY ", ListMixin.all() writes " ORDER BY ". Two spellings would
+# mean two dialects in production, split by whether the caller passed a date.
+# ---------------------------------------------------------------------------
+
+
+class _SqlRecorder(ListMixin):
+    """Real SDK query building, with the SQL captured instead of sent."""
+
+    qbo_object_name = "Bill"
+    emitted: list[str] = []
+
+    @classmethod
+    def query(cls, select, qb=None):
+        cls.emitted.append(select)
+        return []
+
+    @classmethod
+    def count(cls, where_clause="", qb=None):
+        return 0
+
+
+def _emitted_sql(monkeypatch, **kwargs) -> str:
+    _SqlRecorder.emitted = []
+    svc = _service(monkeypatch, "Bill", _SqlRecorder)
+    asyncio.run(svc.get_bills(company_id=1, **kwargs))
+    assert len(_SqlRecorder.emitted) == 1
+    return _SqlRecorder.emitted[0]
+
+
+def test_the_filtered_page_query_orders_by_id(monkeypatch):
+    from datetime import datetime
+
+    sql = _emitted_sql(
+        monkeypatch,
+        start_date=datetime(2024, 1, 1),
+        end_date=datetime(2024, 12, 31),
+    )
+
+    assert sql == (
+        "SELECT * FROM Bill "
+        "WHERE TxnDate >= '2024-01-01' AND TxnDate <= '2024-12-31'"
+        " ORDERBY Id STARTPOSITION 1 MAXRESULTS 1000"
+    )
+
+
+def test_the_unfiltered_page_query_orders_by_id(monkeypatch):
+    sql = _emitted_sql(monkeypatch)
+
+    assert sql == "SELECT * FROM Bill  ORDERBY Id STARTPOSITION 1 MAXRESULTS 1000"
+
+
+def test_both_query_paths_send_one_orderby_spelling(monkeypatch):
+    """The filtered and unfiltered paths must not be two query dialects."""
+    from datetime import datetime
+
+    filtered = _emitted_sql(monkeypatch, start_date=datetime(2024, 1, 1))
+    unfiltered = _emitted_sql(monkeypatch)
+
+    for sql in (filtered, unfiltered):
+        assert " ORDERBY Id " in sql
+        assert "ORDER BY" not in sql
+
+
+def test_the_offset_reaches_the_sql_as_a_one_based_startposition(monkeypatch):
+    sql = _emitted_sql(monkeypatch, offset=1000, max_results=500)
+
+    assert sql.endswith(" ORDERBY Id STARTPOSITION 1001 MAXRESULTS 500")
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +557,29 @@ def test_a_complete_response_says_so_rather_than_staying_quiet(module, path):
 
 
 @pytest.mark.parametrize("module,path", ENDPOINTS, ids=ENDPOINT_IDS)
+def test_an_end_of_set_page_of_unknown_size_says_end_without_saying_size(module, path):
+    """The overshoot branch on the wire: 'complete, size unknown'.
+
+    An empty page past offset 0 with a COUNT QuickBooks did not answer. The
+    empty page establishes there is nothing further, so X-Has-More is false
+    and there is no cursor to hand back; the unanswered count means no
+    X-Total-Count is published rather than a made-up one. Three headers that
+    disagree would be worse than any of them being absent.
+    """
+    end_of_set = PagedResult(rows=[], offset=30_000, total=None, has_more=False)
+    client, _ = _client(module, end_of_set)
+
+    res = client.get(path, params={"company_id": 1, "offset": 30_000})
+
+    assert res.json() == []
+    assert res.headers["X-Has-More"] == "false"
+    assert res.headers["X-Result-Offset"] == "30000"
+    assert res.headers["X-Result-Count"] == "0"
+    assert "X-Total-Count" not in res.headers
+    assert "X-Next-Offset" not in res.headers
+
+
+@pytest.mark.parametrize("module,path", ENDPOINTS, ids=ENDPOINT_IDS)
 def test_offset_is_declared_and_reaches_the_service(module, path):
     """FastAPI drops undeclared query params in silence — the same mechanism
     that swallowed start_date/end_date. An offset that is not in the schema is
@@ -546,6 +681,54 @@ def test_the_trailing_12m_summary_marks_an_aggregate_it_could_not_finish():
 
     assert body["complete"] is False
     assert body["invoices_in_window"] == 50_000
+
+
+def test_an_aggregation_failure_in_the_summary_is_not_reported_as_a_404():
+    """404 means "no such company" here — the service raises ValueError for an
+    unknown company and the handler answers 404.
+
+    `float(inv["TotalAmt"])` raises ValueError too. With the aggregation
+    inside the same try, an amount QuickBooks returned in a shape float()
+    will not take came back as 404, and anything routing on the status code
+    read a live company as missing. The walk now covers up to 20,000 invoices
+    where it used to stop at 1,000, so there are twenty times as many values
+    that can do it.
+    """
+    app = FastAPI()
+    app.include_router(invoices.router)
+    app.dependency_overrides[verify_api_key] = lambda: None
+    app.dependency_overrides[invoices._get_service] = lambda: _PageService(
+        PagedResult(
+            rows=[{"TxnDate": "2026-01-15", "TotalAmt": "1,234.56"}],
+            offset=0,
+            total=1,
+            has_more=False,
+        )
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+
+    res = client.get("/invoices/trailing-12m/summary", params={"company_id": 1})
+
+    assert res.status_code == 500
+
+
+def test_an_unknown_company_in_the_summary_is_still_a_404():
+    """The catch narrowed to the fetch still has to catch the fetch."""
+
+    class _Missing:
+        async def get_all_invoices(self, **kwargs):
+            raise ValueError("QBO company not found: 99")
+
+    app = FastAPI()
+    app.include_router(invoices.router)
+    app.dependency_overrides[verify_api_key] = lambda: None
+    app.dependency_overrides[invoices._get_service] = lambda: _Missing()
+    client = TestClient(app)
+
+    res = client.get("/invoices/trailing-12m/summary", params={"company_id": 99})
+
+    assert res.status_code == 404
+    assert res.json()["detail"] == "QBO company not found: 99"
 
 
 # ---------------------------------------------------------------------------
