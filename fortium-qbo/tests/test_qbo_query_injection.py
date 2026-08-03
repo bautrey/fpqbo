@@ -27,7 +27,7 @@ unterminated literal rather than as a subtle difference in a magic string.
 import ast
 import asyncio
 import pathlib
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -237,6 +237,38 @@ def test_the_date_clause_still_renders_the_way_it_always_has():
 def test_a_date_operator_outside_the_allowed_set_is_refused():
     with pytest.raises(ValueError):
         date_bound("TxnDate", ">= '1900-01-01' OR TxnDate <", datetime(2024, 1, 1))
+
+
+class _HostileDate(date):
+    """A date that passes ``isinstance`` and renders as a clause."""
+
+    def isoformat(self):
+        return "2024-01-01' OR TxnDate > '1900-01-01"
+
+
+class _HostileDatetime(datetime):
+    def isoformat(self, *args, **kwargs):
+        return "2024-03-31' OR TxnDate > '1900-01-01"
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (_HostileDate(2024, 1, 1), "TxnDate >= '2024-01-01'"),
+        (_HostileDatetime(2024, 3, 31, 13, 45), "TxnDate >= '2024-03-31'"),
+    ],
+)
+def test_a_date_subclass_does_not_get_to_choose_the_text_in_the_query(value, expected):
+    """``isinstance(value, date)`` is a check on the type, not on the text.
+
+    A subclass satisfies it and then answers ``isoformat`` with anything it
+    likes. Nothing reaches ``date_bound`` with an overridden ``isoformat``
+    today — the routers parse with ``parse_date_param`` and hand down a
+    ``datetime`` — so this is the type check being made to mean what the
+    module says it means, ahead of the caller that would otherwise find out
+    the hard way.
+    """
+    assert date_bound("TxnDate", ">=", value) == expected
 
 
 # ---------------------------------------------------------------------------

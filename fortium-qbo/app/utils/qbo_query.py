@@ -96,12 +96,23 @@ def date_bound(field: str, operator: str, value: date | datetime) -> str:
     rather than escaped, so the only text that reaches the query is
     ``date.isoformat`` output. ``isoformat`` rather than ``strftime`` because
     ``%Y`` is not zero-padded consistently across platforms.
+
+    The bound is rebuilt as a plain ``date`` rather than used as it arrived.
+    ``isinstance(value, date)`` admits a subclass, and a subclass may define
+    ``isoformat``, so the type check on its own proves the year, month and day
+    are numbers and proves nothing at all about the text they render as. The
+    ``datetime`` branch already had this — ``value.date()`` returns a ``date``,
+    not whatever subclass it was called on — and the other branch now matches
+    it. Nothing reaches here with an overridden ``isoformat`` today, since the
+    routers parse with ``parse_date_param`` and get a ``datetime`` back, but
+    the rule of the module is that the text in the query comes from a type we
+    picked, and reading three integers is what makes that true here.
     """
     if operator not in DATE_OPERATORS:
         raise ValueError(f"Not a date comparison operator: {operator!r}")
     if not isinstance(value, date):
         raise TypeError(f"{field} bound must be a date or datetime, got {type(value).__name__}")
-    day = value.date() if isinstance(value, datetime) else value
+    day = date(value.year, value.month, value.day)
     return f"{_checked_field(field)} {operator} '{day.isoformat()}'"
 
 
