@@ -442,6 +442,17 @@ def test_a_query_that_cannot_be_built_is_not_answered_as_a_missing_bill():
 #     argued for, in
 #     `test_the_interpolation_guard_reads_only_the_modules_that_can_query_qbo`)
 #     and the call-site guard reads it but finds no query call to hang it on.
+#   - THIS FILE'S OWN SUBJECT, `app/utils/qbo_query.py`, is the live instance of
+#     the bullet above and deserves naming rather than deduction. It is excluded
+#     from the interpolation guard's file set on purpose, and it contains no
+#     query call for the call-site guard, so a clause helper added there is
+#     unguarded by both. A `.format()` builder planted in it leaves the whole
+#     suite green, and its caller in qbo_service.py is then indistinguishable
+#     from a legitimate `string_equals(...)`. Since this is the file where the
+#     next clause helper naturally gets added, that is the most likely way
+#     issue #2 comes back. Every builder here must go through `string_equals` /
+#     `id_in` / `date_bound`; a new one that formats its own clause has no
+#     guard behind it and needs its own test.
 #   - a binding that is not a plain local name. The call-site guard tracks
 #     `clause = ...`, not `self.clause = ...`; the interpolation guard covers
 #     the attribute case instead, since it never asks where the string went.
