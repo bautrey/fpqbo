@@ -31,9 +31,13 @@ from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from app.dependencies.api_auth import verify_api_key
+from app.routers import bill_payments
 from app.services.qbo_service import QBOService, _txn_date_clause
-from app.utils.qbo_query import date_bound, id_in, string_equals
+from app.utils.qbo_query import QboQueryError, date_bound, id_in, string_equals
 
 # ---------------------------------------------------------------------------
 # Payloads
@@ -216,10 +220,10 @@ def test_a_date_bound_that_is_not_a_date_is_refused_by_type(monkeypatch):
     bound cannot reach the query even if a future caller passes one straight
     through.
     """
-    with pytest.raises(TypeError):
+    with pytest.raises(QboQueryError):
         _txn_date_clause("2024-01-01' OR TxnDate > '1900-01-01", None)
 
-    with pytest.raises(TypeError):
+    with pytest.raises(QboQueryError):
         _txn_date_clause(None, "2024-12-31' OR '1'='1")
 
 
@@ -235,7 +239,7 @@ def test_the_date_clause_still_renders_the_way_it_always_has():
 
 
 def test_a_date_operator_outside_the_allowed_set_is_refused():
-    with pytest.raises(ValueError):
+    with pytest.raises(QboQueryError):
         date_bound("TxnDate", ">= '1900-01-01' OR TxnDate <", datetime(2024, 1, 1))
 
 
@@ -299,7 +303,7 @@ def test_a_linked_txn_id_that_is_not_digits_never_reaches_the_query(monkeypatch)
         monkeypatch, Bill=_FakeBillWithLinkedId(TRAILING_BACKSLASH), BillPayment=payments
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(QboQueryError):
         asyncio.run(svc.get_bill_payments_by_bill_id(company_id=1, bill_id=64848))
 
     assert payments.clauses == [], "no query should have been issued at all"
@@ -324,8 +328,85 @@ def test_string_equals_escapes_the_backslash_before_the_quote():
 
 def test_a_caller_supplied_field_name_is_refused():
     """The helper is only a gate if the left-hand side is a field name too."""
-    with pytest.raises(ValueError):
+    with pytest.raises(QboQueryError):
         string_equals("DocNumber = '1' OR DocNumber", "x")
+
+
+# ---------------------------------------------------------------------------
+# What the gate says when it refuses
+#
+# Every refusal above is a programmer error — field names and operators are
+# module constants at the call sites, and the ids come from QBO's own
+# LinkedTxn. What matters is that none of them can be read as an answer about
+# the data, which is what a ValueError would have made them.
+# ---------------------------------------------------------------------------
+
+REFUSALS = {
+    "field name": lambda: string_equals("DocNumber = '1' OR DocNumber", "x"),
+    "date operator": lambda: date_bound("TxnDate", "LIKE", datetime(2024, 1, 1)),
+    "date type": lambda: date_bound("TxnDate", ">=", "2024-01-01"),
+    "entity id": lambda: id_in("Id", ["65852", "not-an-id"]),
+    "empty id list": lambda: id_in("Id", []),
+}
+
+
+@pytest.mark.parametrize("refusal", sorted(REFUSALS))
+def test_a_query_that_cannot_be_built_is_never_the_not_found_signal(refusal):
+    """`ValueError` means "no such record" in this service.
+
+    ``qbo_service`` raises it for "QBO company not found" and "Bill not
+    found", and about thirty router handlers answer it with a 404 and the
+    message verbatim. Raised from here, a bad field name would answer ``404
+    {"detail": "Not a QBO field name: ..."}``, and a caller routing on the
+    status code — a sync job, another service — would write down that the
+    record does not exist. That is this PR's own defect class moved into the
+    error channel: a confident wrong answer wearing the shape of a normal
+    negative result.
+
+    ``TypeError`` is no better on the other side: it lands in the routers'
+    blanket ``except Exception`` as ``500 "QBO API error: ..."``, which sends
+    whoever reads that line to Intuit's status page for a local type error.
+    """
+    with pytest.raises(QboQueryError) as raised:
+        REFUSALS[refusal]()
+
+    assert not isinstance(raised.value, (ValueError, TypeError)), (
+        "a 404 handler or a QBO-fault handler would catch this"
+    )
+    assert "QBO query construction bug" in str(raised.value), (
+        "the message has to survive a rewrap as 'QBO API error: ...'"
+    )
+
+
+class _ServiceThatCannotBuildItsQuery:
+    """A service whose clause builder refuses what it was handed."""
+
+    async def get_bill_payments_by_bill_id(self, company_id, bill_id):
+        return id_in("Id", [f"65852{TRAILING_BACKSLASH}"])
+
+
+def test_a_query_that_cannot_be_built_is_not_answered_as_a_missing_bill():
+    """The same thing again, at the status code a caller actually sees.
+
+    ``/bill-payments/by-bill/{bill_id}`` answers "has this bill been paid?".
+    Its handler turns a ValueError into a 404 with the message verbatim,
+    byte-identical in shape to "Bill not found" — so a refusal from the clause
+    builder used to answer "no such bill" about a bill that exists and may
+    well have been paid.
+    """
+    app = FastAPI()
+    app.include_router(bill_payments.router)
+    app.dependency_overrides[verify_api_key] = lambda: None
+    app.dependency_overrides[bill_payments._get_service] = (
+        lambda: _ServiceThatCannotBuildItsQuery()
+    )
+    client = TestClient(app)
+
+    res = client.get("/bill-payments/by-bill/64848", params={"company_id": 1})
+
+    assert res.status_code != 404, "a construction bug read as a missing record"
+    assert res.status_code == 500
+    assert "QBO query construction bug" in res.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

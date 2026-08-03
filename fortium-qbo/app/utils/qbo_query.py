@@ -39,6 +39,7 @@ from datetime import date, datetime
 
 __all__ = [
     "DATE_OPERATORS",
+    "QboQueryError",
     "date_bound",
     "escape_string_literal",
     "id_in",
@@ -46,10 +47,41 @@ __all__ = [
     "string_literal",
 ]
 
+
+class QboQueryError(Exception):
+    """A QBO query clause could not be built from what the caller passed.
+
+    Deliberately not a ``ValueError``. In this service ``ValueError`` is the
+    record-not-found signal — ``qbo_service`` raises it for "QBO company not
+    found" and "Bill not found", and around thirty router handlers turn it
+    verbatim into a 404. A bad field name raised as a ``ValueError`` would
+    answer ``404 {"detail": "Not a QBO field name: 'Doc Number'"}``, and
+    anything routing on the status code would record "this record does not
+    exist" and move on. That is the defect class this module exists to close,
+    relocated from the query into the error channel: a confident wrong answer
+    that reads like a normal negative result. ``routers/invoices.py`` carries
+    a comment about the last time this happened, when a ``float()`` failure
+    inside a ``try`` became "no such company".
+
+    None of the conditions raised here is a caller-data condition. Field names
+    and operators are module constants at every call site, and the ids come
+    from QBO's own LinkedTxn. They are all programmer errors, so the honest
+    answer is a 500 that says so, which is what an exception outside the
+    ValueError/TypeError hierarchy gets.
+
+    The message is stamped rather than left to each raise site, so it stays
+    legible after a router's blanket ``except Exception`` rewraps it as "QBO
+    API error: ..." and sends the next reader looking at Intuit.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(f"QBO query construction bug: {message}")
+
+
 # Field names are compile-time constants at every call site today. Checking
 # them anyway is what lets this module be the whole answer: an endpoint added
-# later that passes a caller-supplied field name gets a ValueError instead of
-# a clause with a value welded into the left-hand side.
+# later that passes a caller-supplied field name gets a QboQueryError instead
+# of a clause with a value welded into the left-hand side.
 _FIELD_NAME = re.compile(r"\A[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*\Z")
 
 # QBO entity ids are numeric strings. Anything else is not an id.
@@ -61,7 +93,7 @@ DATE_OPERATORS = frozenset({"=", "<", "<=", ">", ">="})
 def _checked_field(field: str) -> str:
     """Return ``field`` if it names a QBO field, else raise."""
     if not isinstance(field, str) or not _FIELD_NAME.match(field):
-        raise ValueError(f"Not a QBO field name: {field!r}")
+        raise QboQueryError(f"Not a QBO field name: {field!r}")
     return field
 
 
@@ -109,9 +141,11 @@ def date_bound(field: str, operator: str, value: date | datetime) -> str:
     picked, and reading three integers is what makes that true here.
     """
     if operator not in DATE_OPERATORS:
-        raise ValueError(f"Not a date comparison operator: {operator!r}")
+        raise QboQueryError(f"Not a date comparison operator: {operator!r}")
     if not isinstance(value, date):
-        raise TypeError(f"{field} bound must be a date or datetime, got {type(value).__name__}")
+        raise QboQueryError(
+            f"{field} bound must be a date or datetime, got {type(value).__name__}"
+        )
     day = date(value.year, value.month, value.day)
     return f"{_checked_field(field)} {operator} '{day.isoformat()}'"
 
@@ -127,8 +161,8 @@ def id_in(field: str, ids) -> str:
     for value in ids:
         text = str(value)
         if not _ENTITY_ID.match(text):
-            raise ValueError(f"Not a QBO entity id for {field}: {text!r}")
+            raise QboQueryError(f"Not a QBO entity id for {field}: {text!r}")
         checked.append(f"'{text}'")
     if not checked:
-        raise ValueError(f"No ids to match on {field}")
+        raise QboQueryError(f"No ids to match on {field}")
     return f"{_checked_field(field)} in ({', '.join(checked)})"
