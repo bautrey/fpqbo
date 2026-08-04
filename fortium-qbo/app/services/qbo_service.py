@@ -60,12 +60,12 @@ from quickbooks.objects.trackingclass import Class as TrackingClass
 from quickbooks.objects.transfer import Transfer
 from quickbooks.objects.vendor import Vendor
 from quickbooks.objects.vendorcredit import VendorCredit
-from quickbooks.utils import build_choose_clause
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.qbo_company import QboCompany
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
+from app.utils.qbo_query import date_bound, id_in, string_equals
 
 logger = logging.getLogger(__name__)
 
@@ -123,15 +123,15 @@ def _txn_date_clause(
     mean a caller who sends only `start_date` gets every row back with a 200
     and no indication the bound was dropped.
 
-    The bounds are `datetime` objects rather than strings so the values
-    interpolated into the query are always a `strftime` result, never
-    caller-supplied text.
+    The bounds are `datetime` objects rather than strings, and `date_bound`
+    refuses anything that is not one, so the only text that reaches the query
+    is a serialised date.
     """
     clauses = []
     if start_date:
-        clauses.append(f"TxnDate >= '{start_date.strftime('%Y-%m-%d')}'")
+        clauses.append(date_bound("TxnDate", ">=", start_date))
     if end_date:
-        clauses.append(f"TxnDate <= '{end_date.strftime('%Y-%m-%d')}'")
+        clauses.append(date_bound("TxnDate", "<=", end_date))
     return " AND ".join(clauses) if clauses else None
 
 
@@ -606,7 +606,7 @@ class QBOService:
         client = self._get_client(company)
 
         def _fetch():
-            results = Invoice.where(f"DocNumber = '{doc_number}'", qb=client)
+            results = Invoice.where(string_equals("DocNumber", doc_number), qb=client)
             return results[0] if results else None
 
         invoice = await self._to_thread_with_retry(_fetch, op="get_invoice_by_doc_number")
@@ -962,7 +962,7 @@ class QBOService:
         client = self._get_client(company)
 
         def _fetch():
-            results = Account.where(f"AcctNum = '{account_number}'", qb=client)
+            results = Account.where(string_equals("AcctNum", account_number), qb=client)
             return results[0] if results else None
 
         account = await self._to_thread_with_retry(_fetch, op="get_account_by_number")
@@ -1273,7 +1273,7 @@ class QBOService:
 
         def _read_payments():
             return BillPayment.where(
-                build_choose_clause(payment_ids, "Id"),
+                id_in("Id", payment_ids),
                 max_results=QBO_MAX_PAGE_SIZE,
                 qb=client,
             )
