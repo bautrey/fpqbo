@@ -136,7 +136,7 @@ def boolean_equals(field: str, value: bool) -> str:
     """
     if not isinstance(value, bool):
         raise QboQueryError(
-            f"{field} must be a bool, got {type(value).__name__}: {value!r}"
+            f"{field!r} must be a bool, got {type(value).__name__}: {value!r}"
         )
     return f"{_checked_field(field)} = {'true' if value else 'false'}"
 

@@ -823,3 +823,21 @@ def test_the_total_counts_only_the_filtered_set(monkeypatch, attr, method):
     asyncio.run(getattr(svc, method)(company_id=1, active_only=True))
 
     assert entity.count_calls == ["Active = true"]
+
+
+@pytest.mark.parametrize(
+    "attr,method", ACTIVE_LIST_METHODS, ids=ACTIVE_LIST_IDS
+)
+def test_the_unfiltered_total_counts_the_whole_file(monkeypatch, attr, method):
+    """The mirror of the test above, and it needs a full page to reach.
+
+    `_fetch_page` skips the COUNT entirely on a short page, so a small fake
+    ledger proves nothing about what the COUNT was given — the assertion would
+    pass against an empty count_calls list either way.
+    """
+    entity = _FakeEntity(ledger_size=27_187)
+    svc = _service(monkeypatch, attr, entity)
+
+    asyncio.run(getattr(svc, method)(company_id=1, active_only=False))
+
+    assert entity.count_calls == [""]
