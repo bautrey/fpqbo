@@ -65,7 +65,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.qbo_company import QboCompany
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
-from app.utils.qbo_query import date_bound, id_in, string_equals
+from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,17 @@ def _txn_date_clause(
     if end_date:
         clauses.append(date_bound("TxnDate", "<=", end_date))
     return " AND ".join(clauses) if clauses else None
+
+
+def _active_clause(active_only: bool) -> str | None:
+    """Build the Active portion of a QBO query, or None for everything.
+
+    These endpoints used to route through `Entity.filter(Active=True)`, which
+    the paged read path deliberately does not use — `_query_page` goes through
+    `where()` only, because the SDK spells ORDERBY differently in the two and a
+    page without a stable order is not a page. So the filter becomes a clause.
+    """
+    return boolean_equals("Active", True) if active_only else None
 
 
 def _is_transient_qbo_error(exc: Exception) -> bool:
@@ -641,19 +652,23 @@ class QBOService:
         return customer.to_dict() if customer else None
 
     async def get_vendors(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
-        """Get vendors."""
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of vendors, optionally limited to active ones."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return Vendor.filter(Active=True, max_results=max_results, qb=client)
-            return Vendor.all(max_results=max_results, qb=client)
-
-        vendors = await self._to_thread_with_retry(_fetch, op="get_vendors")
-        return [v.to_dict() for v in vendors]
+        return await self._fetch_page(
+            Vendor,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_vendors",
+        )
 
     async def get_vendor_by_id(
         self, company_id: int, vendor_id: int
@@ -927,19 +942,23 @@ class QBOService:
         return result.to_dict()
 
     async def get_accounts(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
-        """Get chart of accounts."""
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the chart of accounts."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return Account.filter(Active=True, max_results=max_results, qb=client)
-            return Account.all(max_results=max_results, qb=client)
-
-        accounts = await self._to_thread_with_retry(_fetch, op="get_accounts")
-        return [a.to_dict() for a in accounts]
+        return await self._fetch_page(
+            Account,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_accounts",
+        )
 
     async def get_account_by_id(
         self, company_id: int, account_id: int

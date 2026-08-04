@@ -40,6 +40,7 @@ from datetime import date, datetime
 __all__ = [
     "DATE_OPERATORS",
     "QboQueryError",
+    "boolean_equals",
     "date_bound",
     "escape_string_literal",
     "id_in",
@@ -119,6 +120,25 @@ def string_equals(field: str, value: str) -> str:
     validating builder for that type instead.
     """
     return f"{_checked_field(field)} = {string_literal(value)}"
+
+
+def boolean_equals(field: str, value: bool) -> str:
+    """Build ``Active = true`` for a QBO boolean field.
+
+    QBO spells booleans as bare ``true``/``false``, unquoted — a quoted
+    ``'true'`` is a string literal and the comparison silently matches nothing.
+
+    ``bool`` is checked rather than coerced. Every Python object has a truth
+    value, so ``if value`` would accept the string ``"false"`` and build
+    ``Active = true`` from it, which is the "confident wrong answer" this
+    module exists to prevent. ``isinstance(True, int)`` also holds, so the
+    check is on ``bool`` specifically and ``1`` is refused too.
+    """
+    if not isinstance(value, bool):
+        raise QboQueryError(
+            f"{field} must be a bool, got {type(value).__name__}: {value!r}"
+        )
+    return f"{_checked_field(field)} = {'true' if value else 'false'}"
 
 
 def date_bound(field: str, operator: str, value: date | datetime) -> str:

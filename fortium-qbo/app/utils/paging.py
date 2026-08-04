@@ -134,7 +134,11 @@ PAGING_RESPONSE_HEADERS: dict[str, dict[str, Any]] = {
     HEADER_HAS_MORE: {
         "description": (
             "'true' when rows matching this query exist past this page. Always "
-            "present, including when it is 'false'."
+            "present, including when it is 'false'. Compare it against the "
+            "string 'true' — this is the text 'false', not a boolean, and in "
+            "JavaScript a non-empty string is truthy, so "
+            "`if (res.headers.get('x-has-more'))` is taken on every response "
+            "and reports a complete result set as truncated."
         ),
         "schema": {"type": "string", "enum": ["true", "false"]},
     },
