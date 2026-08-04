@@ -138,12 +138,23 @@ def _txn_date_clause(
 def _active_clause(active_only: bool) -> str | None:
     """Build the Active portion of a QBO query, or None for everything.
 
-    These endpoints used to route through `Entity.filter(Active=True)`, which
-    the paged read path deliberately does not use — `_query_page` goes through
-    `where()` only, because the SDK spells ORDERBY differently in the two and a
-    page without a stable order is not a page. So the filter becomes a clause.
+    `boolean_equals` is called before the branch rather than inside it. Testing
+    `if active_only` first would hand the gate a literal `True` and let the
+    caller's own value through unexamined: `_active_clause("false")` built
+    `Active = true`, and `_active_clause(0)` dropped the filter and returned
+    every inactive row. Unreachable over HTTP, where FastAPI coerces the query
+    param to `bool` before it arrives — but a type gate its only call site
+    steps around is not a gate.
+
+    These endpoints used to reach QuickBooks through `Entity.filter(...)`,
+    which does go through `where()` but builds its clause with the SDK's
+    `build_where_clause` — the helper `qbo_query` exists to replace, since it
+    escapes a quote and leaves a backslash alone. The unfiltered branch used
+    `all()`, whose ORDERBY spelling differs from `where()`'s. One clause
+    builder and one dialect now.
     """
-    return boolean_equals("Active", True) if active_only else None
+    clause = boolean_equals("Active", active_only)
+    return clause if active_only else None
 
 
 def _is_transient_qbo_error(exc: Exception) -> bool:
@@ -438,8 +449,12 @@ class QBOService:
         about it — `ListMixin.where()` emits ` ORDERBY `, `ListMixin.all()`
         emits ` ORDER BY ` — and splitting on `clause` would put two query
         dialects into production, one per code path. `where("")` builds the
-        same SELECT `all()` would, minus an Item/Sku special case that no
-        entity on this path uses (Bill, Invoice, Payment, Purchase).
+        same SELECT `all()` would, minus one special case: `all()` asks for
+        `SELECT *, Sku` when the entity is Item, because QBO leaves Sku out of
+        `*`. No entity on this path is Item (Bill, Invoice, Payment, Purchase,
+        Vendor, Account), so nothing is dropped today — but paging Item means
+        carrying that column onto the clause path first, or every item comes
+        back without its SKU and the response still looks well formed.
         """
 
         def _fetch():

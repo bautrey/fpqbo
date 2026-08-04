@@ -123,8 +123,17 @@ LIST_IDS = [method for _, method in LIST_METHODS]
 
 # The subset that takes a date range. Vendors and accounts are not
 # transactions and carry no TxnDate, so a date-filtered assertion has nothing
-# to say about them.
-TXN_LIST_METHODS = LIST_METHODS[:4]
+# to say about them. Named rather than sliced off LIST_METHODS: a positional
+# slice keeps returning four entries as that list grows, so an entity inserted
+# ahead of the cut would quietly swap itself in for one of these and the
+# date-clause assertion would stop covering a transaction endpoint without a
+# single test going red.
+TXN_LIST_METHODS = [
+    ("Bill", "get_bills"),
+    ("Purchase", "get_purchases"),
+    ("Invoice", "get_invoices"),
+    ("Payment", "get_payments"),
+]
 TXN_LIST_IDS = [method for _, method in TXN_LIST_METHODS]
 
 # The subset whose default read is filtered rather than unfiltered.

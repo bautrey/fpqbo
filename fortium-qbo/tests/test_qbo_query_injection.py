@@ -367,6 +367,21 @@ def test_the_active_clause_is_the_filter_it_replaced():
     assert _active_clause(False) is None
 
 
+@pytest.mark.parametrize("payload", ["false", "true", 1, 0, None, []])
+def test_the_active_clause_does_not_step_around_its_own_type_gate(payload):
+    """The gate has to run before the branch, not inside it.
+
+    Testing `if active_only` first hands `boolean_equals` a literal True and
+    never shows it the caller's value: `"false"` built `Active = true`, and
+    `0` returned None, dropping the filter and every inactive row with it.
+    FastAPI coerces the query param before it reaches here, so this is not
+    reachable over HTTP — which is exactly why it needs a test rather than a
+    404 in production to find it.
+    """
+    with pytest.raises(QboQueryError):
+        _active_clause(payload)
+
+
 # ---------------------------------------------------------------------------
 # What the gate says when it refuses
 #
