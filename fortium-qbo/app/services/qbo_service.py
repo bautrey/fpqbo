@@ -1281,7 +1281,37 @@ class QBOService:
         items = await self._to_thread_with_retry(
             _read_payments, op="get_bill_payments_by_bill_id"
         )
-        return [i.to_dict() for i in items]
+        rows = [i.to_dict() for i in items]
+
+        # The bill named these ids; the query asked for exactly them. An id
+        # that comes back short was named by the bill and could not be read —
+        # QBO leaves the LinkedTxn in place on some delete paths, so the link
+        # outlives the payment. Returning what did resolve answers "what paid
+        # this bill?" with a subset that looks like the whole: a $25,000 bill
+        # settled by $15,000 + $10,000 reads as $15,000 paid, and the 0-of-N
+        # case reads as `[]`, which is the never-paid answer this lookup was
+        # rewritten to stop giving. Refusing is the only answer that is not
+        # quietly wrong.
+        returned = {str(row.get("Id")) for row in rows}
+        unresolved = [pid for pid in payment_ids if pid not in returned]
+        if unresolved:
+            logger.error(
+                "Bill %s links %d BillPayment(s) but only %d resolved; "
+                "unresolved id(s): %s",
+                bill_id,
+                len(payment_ids),
+                len(rows),
+                ", ".join(unresolved),
+            )
+            # RuntimeError, not ValueError: the router reads ValueError as
+            # "Bill not found" and answers 404, and this bill was found.
+            raise RuntimeError(
+                f"Bill {bill_id} links {len(payment_ids)} BillPayment(s) but "
+                f"only {len(rows)} resolved; unresolved id(s): "
+                f"{', '.join(unresolved)}"
+            )
+
+        return rows
 
     async def create_bill_payment(
         self, company_id: int, payment_data: dict[str, Any]

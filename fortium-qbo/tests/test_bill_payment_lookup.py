@@ -28,6 +28,7 @@ the ledger.
 """
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -224,6 +225,92 @@ def test_a_bill_that_does_not_exist_is_not_a_bill_without_payments(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Partial resolution
+#
+# The bill names its payments; the second query fetches them. Nothing made the
+# two agree, so a payment id the bill named and QuickBooks did not return was
+# dropped without a word. QBO leaves the LinkedTxn on the bill on some delete
+# paths, so the ids can outlive the payments.
+#
+# Bill 64848 is $25,000 settled by two partial payments, $15,000 and $10,000.
+# Drop one and the endpoint answers 200 with $15,000 for a bill that was paid
+# in full. Drop both and it answers `[]`, which is the "paid bill reads as
+# unpaid" defect this file exists to close, arriving through another door.
+# ---------------------------------------------------------------------------
+
+
+SPLIT_LEDGER = {
+    "65852": {"Id": "65852", "TxnDate": "2024-03-13", "TotalAmt": 15000.0},
+    "65853": {"Id": "65853", "TxnDate": "2024-04-10", "TotalAmt": 10000.0},
+}
+SPLIT_BILLS = {"64848": [_linked("65852"), _linked("65853")]}
+
+
+def test_a_bill_settled_by_two_payments_returns_both_and_the_full_amount(monkeypatch):
+    """Control: when every linked id resolves, both payments come back.
+
+    The check added below must not fire on the case it is meant to let
+    through — a bill paid in instalments is ordinary, not an error.
+    """
+    rows, payments = _lookup(monkeypatch, 64848, bills=SPLIT_BILLS, ledger=SPLIT_LEDGER)
+
+    assert [r["Id"] for r in rows] == ["65852", "65853"]
+    assert sum(r["TotalAmt"] for r in rows) == 25000.0
+    assert payments.where_calls[0]["clause"] == "Id in ('65852', '65853')"
+
+
+def test_one_payment_of_two_missing_is_refused_not_answered_short(monkeypatch, caplog):
+    """$15,000 is a worse answer than no answer for a bill paid $25,000.
+
+    The caller asked what paid this bill. A subset says the bill is half
+    settled and carries no mark saying otherwise, so nothing downstream can
+    tell it apart from the truth.
+    """
+    ledger = {"65852": SPLIT_LEDGER["65852"]}
+    payments = _FakeBillPayment(ledger)
+    svc = _service(monkeypatch, _FakeBill(SPLIT_BILLS), payments)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.qbo_service"):
+        with pytest.raises(Exception) as caught:  # broad: the type is the assertion below
+            asyncio.run(svc.get_bill_payments_by_bill_id(company_id=1, bill_id=64848))
+
+    # Not a 404: `routers/bill_payments.py` maps ValueError to "Bill not found",
+    # and this bill was found. Reporting a live bill as missing trades one wrong
+    # answer for another.
+    assert not isinstance(caught.value, (ValueError, TypeError))
+
+    # The id that went missing has to be in the message, or the next person
+    # gets "something did not resolve" and a ledger to search by hand.
+    assert "65853" in str(caught.value)
+    assert "64848" in str(caught.value)
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "an unresolved payment id must be logged, not only raised"
+    logged = " ".join(r.getMessage() for r in errors)
+    assert "65853" in logged
+    assert "64848" in logged
+
+
+def test_no_payment_resolving_is_refused_rather_than_read_as_unpaid(monkeypatch):
+    """The 0-of-1 case is byte-identical to a bill nobody ever paid.
+
+    `[]` here would reintroduce the exact confusion this lookup was rewritten
+    to remove, so the bill having named a payment has to survive as a refusal.
+    """
+    payments = _FakeBillPayment({})
+    svc = _service(monkeypatch, _FakeBill({"64848": [_linked("65852")]}), payments)
+
+    with pytest.raises(Exception) as caught:  # broad: the type is the assertion below
+        asyncio.run(svc.get_bill_payments_by_bill_id(company_id=1, bill_id=64848))
+
+    assert not isinstance(caught.value, (ValueError, TypeError))
+    assert "65852" in str(caught.value)
+    # The honest empty case still exists and still returns []; bill 70000 has
+    # no links at all, so the two are told apart by the bill, not by the count.
+    assert _lookup(monkeypatch, 70000)[0] == []
+
+
+# ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
 
@@ -262,3 +349,24 @@ def test_a_missing_bill_is_a_404_not_an_empty_list():
 
     assert res.status_code == 404
     assert res.json()["detail"] == "Bill not found: 99999999"
+
+
+def test_a_half_resolved_bill_is_not_served_as_a_200_or_a_404(monkeypatch):
+    """Through the router, with the real service: no partial body, no 404.
+
+    404 would say bill 64848 does not exist, and it does — the router reads
+    ValueError as "Bill not found", so the refusal is raised outside that
+    hierarchy on purpose.
+    """
+    svc = _service(
+        monkeypatch,
+        _FakeBill(SPLIT_BILLS),
+        _FakeBillPayment({"65852": SPLIT_LEDGER["65852"]}),
+    )
+    client = _client(svc)
+
+    res = client.get("/bill-payments/by-bill/64848", params={"company_id": 1})
+
+    assert res.status_code != 200, "a bill paid $25,000 must not answer $15,000"
+    assert res.status_code != 404, "the bill exists; 404 would deny it"
+    assert res.status_code == 500
