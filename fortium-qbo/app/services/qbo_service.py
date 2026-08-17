@@ -451,10 +451,17 @@ class QBOService:
         dialects into production, one per code path. `where("")` builds the
         same SELECT `all()` would, minus one special case: `all()` asks for
         `SELECT *, Sku` when the entity is Item, because QBO leaves Sku out of
-        `*`. No entity on this path is Item (Bill, Invoice, Payment, Purchase,
-        Vendor, Account), so nothing is dropped today — but paging Item means
-        carrying that column onto the clause path first, or every item comes
-        back without its SKU and the response still looks well formed.
+        `*`. So paging Item means carrying that column onto the clause path
+        first, or every item comes back without its SKU and the response still
+        looks well formed. Stated as the rule rather than as a list of which
+        entities are currently safe — that list went stale twice in two PRs,
+        and a checklist nobody updates is worse than no checklist.
+
+        Two conditions an entity has to meet before it belongs here: it is not
+        Item (above), and it has a top-level `Id` to order by. Ordering is what
+        makes an offset mean the same thing on two different requests, so an
+        entity without an `Id` cannot be paged at all — see
+        `get_recurring_transactions`, which is why that one is still unpaged.
         """
 
         def _fetch():
@@ -2391,22 +2398,38 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_recurring_transactions(
-        self,
-        company_id: int,
-        max_results: int = QBO_MAX_PAGE_SIZE,
-        offset: int = 0,
-    ) -> PagedResult:
-        """Get one page of recurring transactions."""
+        self, company_id: int, max_results: int = 1000
+    ) -> list[dict[str, Any]]:
+        """Get recurring transactions. Deliberately NOT paged — see below.
+
+        This is the one entity in the #12 group that cannot go through
+        `_fetch_page`. RecurringTransaction is a wrapper, not a row: the SDK
+        class carries no `Id` field, only a `class_dict` mapping a wrapped
+        type name to a Recurring<Type>, and live rows come back shaped
+        `{"JournalEntry": {...}}` with no top-level Id at all.
+
+        `_query_page` orders every page by `Id`, which is what makes an offset
+        mean the same thing twice. Sending `ORDERBY Id` against an entity that
+        has no Id gets one of two answers, and both are worse than not paging:
+        QBO faults, turning a working 200 into a catch-all 500, or it ignores
+        the clause, in which case `offset` silently does nothing while
+        X-Has-More and X-Next-Offset tell the caller to keep going and it
+        assembles the same rows over and over.
+
+        Not paging costs nothing here. These are scheduling templates, not a
+        ledger: measured against production on 2026-08-17 the four connected
+        companies hold 14, 0, 0 and 0 of them. The 1000-row ceiling #12 is
+        about is not reachable, so the truncation this endpoint could suffer
+        is theoretical while the paging breakage would be immediate.
+        """
         company = self._get_company(company_id)
         client = self._get_client(company)
-        return await self._fetch_page(
-            RecurringTransaction,
-            client=client,
-            clause=None,
-            offset=offset,
-            limit=max_results,
-            op="get_recurring_transactions",
-        )
+
+        def _fetch():
+            return RecurringTransaction.all(max_results=max_results, qb=client)
+
+        items = await self._to_thread_with_retry(_fetch, op="get_recurring_transactions")
+        return [i.to_dict() for i in items]
 
     async def get_recurring_transaction_by_id(
         self, company_id: int, entity_id: int

@@ -149,8 +149,11 @@ LIST_METHODS = [
     ("RefundReceipt", "get_refund_receipts"),
     ("Estimate", "get_estimates"),
     ("Transfer", "get_transfers"),
-    ("RecurringTransaction", "get_recurring_transactions"),
     ("TimeActivity", "get_time_activities"),
+    # RecurringTransaction is NOT here, and must not be added. It is a wrapper
+    # with no top-level Id, so it cannot be ordered by the key that makes an
+    # offset stable. See test_recurring_transactions_is_not_paged below and
+    # the docstring on QBOService.get_recurring_transactions.
 ]
 LIST_IDS = [method for _, method in LIST_METHODS]
 
@@ -579,9 +582,9 @@ ENDPOINTS = [
     (refund_receipts, "/refund-receipts/"),
     (estimates, "/estimates/"),
     (transfers, "/transfers/"),
-    # Route prefix is /recurring-transactions, not /recurring.
-    (recurring, "/recurring-transactions/"),
     (time_activities, "/time-activities/"),
+    # /recurring-transactions/ is NOT here — it is not paged. See
+    # test_recurring_transactions_is_not_paged below.
 ]
 ENDPOINT_IDS = [path.strip("/") for _, path in ENDPOINTS]
 
@@ -869,6 +872,32 @@ def test_the_total_counts_only_the_filtered_set(monkeypatch, attr, method):
     asyncio.run(getattr(svc, method)(company_id=1, active_only=True))
 
     assert entity.count_calls == ["Active = true"]
+
+
+def test_recurring_transactions_is_not_paged():
+    """The one entity in the #12 group that must stay on the unpaged path.
+
+    RecurringTransaction is a wrapper, not a row — the SDK class defines no
+    `Id`, and live rows arrive shaped `{"JournalEntry": {...}}`. `_query_page`
+    orders by `Id`, which is the whole reason an offset means the same thing
+    twice, so paging this entity gets either a fault (a working 200 becomes a
+    catch-all 500) or a silently ignored ORDERBY, where `offset` no-ops while
+    the headers promise a cursor and the caller reassembles duplicates.
+
+    Asserted rather than commented because the next sweep over the remaining
+    list endpoints will look exactly like the one that added it here.
+    """
+    from quickbooks.objects.recurringtransaction import RecurringTransaction
+
+    assert not hasattr(RecurringTransaction, "Id"), (
+        "RecurringTransaction grew an Id — re-check whether it can now be paged"
+    )
+    assert "get_recurring_transactions" not in LIST_IDS, (
+        "recurring-transactions must not join the paged list methods"
+    )
+    assert all(path != "/recurring-transactions/" for _, path in ENDPOINTS), (
+        "recurring-transactions must not join the paged endpoints"
+    )
 
 
 @pytest.mark.parametrize(
