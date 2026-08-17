@@ -20,7 +20,17 @@ def _get_service(db: Session = Depends(get_db)) -> QBOService:
 @router.get("/", response_model=list[dict[str, Any]])
 async def list_recurring_transactions(
     company_id: int = Query(..., description="QBO company ID"),
-    max_results: int = Query(1000, le=1000, description="Max results"),
+    # ge=1 for the same reason the paged endpoints have it: max_results=0 is
+    # falsy in ListMixin.all's `if max_results:`, so the MAXRESULTS clause is
+    # dropped and QuickBooks answers with its own default inside a 200 —
+    # fewer rows than asked for, with nothing saying so.
+    #
+    # Fourteen other unpaged endpoints share this defect and are NOT fixed
+    # here — tax.py, reference.py, items.py, employees.py, departments.py,
+    # customers.py, attachments.py all still declare Query(1000, le=1000).
+    # They are the #11 group and are tracked there; this one is guarded
+    # because it is the endpoint this PR touches and declares safe.
+    max_results: int = Query(1000, ge=1, le=1000, description="Max results"),
     qbo: QBOService = Depends(_get_service),
 ) -> list[dict[str, Any]]:
     """List all recurring transactions."""

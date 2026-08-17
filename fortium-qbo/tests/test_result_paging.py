@@ -19,6 +19,7 @@ QuickBooks, not a value that merely reached the handler.
 """
 
 import asyncio
+import logging
 
 import pytest
 from fastapi import FastAPI
@@ -27,7 +28,25 @@ from fastapi.testclient import TestClient
 from quickbooks.mixins import ListMixin
 
 from app.dependencies.api_auth import verify_api_key
-from app.routers import accounts, bills, invoices, payments, purchases, vendors
+from app.routers import (
+    accounts,
+    bill_payments,
+    bills,
+    credit_memos,
+    deposits,
+    estimates,
+    invoices,
+    journal_entries,
+    payments,
+    purchase_orders,
+    purchases,
+    refund_receipts,
+    sales_receipts,
+    time_activities,
+    transfers,
+    vendor_credits,
+    vendors,
+)
 from app.services.qbo_service import QBOService
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult, apply_paging_headers
 
@@ -118,6 +137,24 @@ LIST_METHODS = [
     # unfiltered one, including that the COUNT is taken over the same filter.
     ("Vendor", "get_vendors"),
     ("Account", "get_accounts"),
+    # The group from #12 and its follow-up comment (the issue body names
+    # four; the comment expands it). No date range and no Active filter —
+    # they page on offset alone, the plainest form of everything below.
+    ("JournalEntry", "get_journal_entries"),
+    ("BillPayment", "get_bill_payments"),
+    ("Deposit", "get_deposits"),
+    ("VendorCredit", "get_vendor_credits"),
+    ("PurchaseOrder", "get_purchase_orders"),
+    ("CreditMemo", "get_credit_memos"),
+    ("SalesReceipt", "get_sales_receipts"),
+    ("RefundReceipt", "get_refund_receipts"),
+    ("Estimate", "get_estimates"),
+    ("Transfer", "get_transfers"),
+    ("TimeActivity", "get_time_activities"),
+    # RecurringTransaction is NOT here, and must not be added. It is a wrapper
+    # with no top-level Id, so it cannot be ordered by the key that makes an
+    # offset stable. See test_recurring_transaction_has_no_id_to_order_by and
+    # the docstring on QBOService.get_recurring_transactions.
 ]
 LIST_IDS = [method for _, method in LIST_METHODS]
 
@@ -536,6 +573,19 @@ ENDPOINTS = [
     (invoices, "/invoices/"),
     (vendors, "/vendors/"),
     (accounts, "/accounts/"),
+    (journal_entries, "/journal-entries/"),
+    (bill_payments, "/bill-payments/"),
+    (deposits, "/deposits/"),
+    (vendor_credits, "/vendor-credits/"),
+    (purchase_orders, "/purchase-orders/"),
+    (credit_memos, "/credit-memos/"),
+    (sales_receipts, "/sales-receipts/"),
+    (refund_receipts, "/refund-receipts/"),
+    (estimates, "/estimates/"),
+    (transfers, "/transfers/"),
+    (time_activities, "/time-activities/"),
+    # /recurring-transactions/ is NOT here — it is not paged. See
+    # test_the_unpageable_endpoints_advertise_no_cursor.
 ]
 ENDPOINT_IDS = [path.strip("/") for _, path in ENDPOINTS]
 
@@ -823,6 +873,153 @@ def test_the_total_counts_only_the_filtered_set(monkeypatch, attr, method):
     asyncio.run(getattr(svc, method)(company_id=1, active_only=True))
 
     assert entity.count_calls == ["Active = true"]
+
+
+class _CountFaultingEntity(_FakeEntity):
+    """QuickBooks serves the page, then faults on the COUNT round trip."""
+
+    def count(self, where_clause="", qb=None):
+        self.count_calls.append(where_clause)
+        raise RuntimeError("QBO fault on COUNT")
+
+
+def test_a_failed_count_still_serves_the_page_it_already_has(monkeypatch, caplog):
+    """A COUNT fault leaves the size unknown, not the page invalid.
+
+    Before this, a full page QBO had already returned was discarded because
+    the follow-up COUNT raised, and the router's catch-all turned it into a
+    500. `total=None` is the state that means "size unknown" — the same one a
+    COUNT answered without a totalCount produces — so has_more stays True and
+    the caller is told the set may continue.
+    """
+    entity = _CountFaultingEntity(ledger_size=27_187)
+    svc = _service(monkeypatch, "Bill", entity)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.qbo_service"):
+        page = asyncio.run(svc.get_bills(company_id=1))
+
+    assert len(page.rows) == PAGE, "the page QBO served must survive a COUNT fault"
+    assert page.total is None
+    assert page.has_more is True, "unknown size must read as possibly-more, not complete"
+    assert page.next_offset == PAGE
+
+    # Degrading quietly would look identical to QBO declining to count.
+    # ERROR, not WARNING: this branch is only reached once the retries are
+    # exhausted, which is the terminal case this module logs at ERROR.
+    assert [r for r in caplog.records if r.levelno == logging.ERROR], (
+        "a COUNT that faults every time must leave a server-side trace"
+    )
+
+
+def test_a_failed_count_does_not_discard_a_completed_walk(monkeypatch, caplog):
+    """The same guarantee at the other _count_matching call site.
+
+    `_fetch_all_pages` reaches its COUNT only after exhausting the page
+    budget, so a fault there throws away up to twenty pages QuickBooks already
+    served — the outcome is the same as the single-page case but the cost is
+    twenty times larger. The guard lives in `_count_matching` rather than at
+    either call site so there is one implementation of it.
+    """
+    # The budget has to be exhausted to reach the COUNT at all — a walk that
+    # ends on a short page returns from there and never counts. An earlier
+    # draft of this test used a ledger the walk could finish, so it proved
+    # nothing about the COUNT path.
+    entity = _CountFaultingEntity(ledger_size=2500)
+    svc = _service(monkeypatch, "Invoice", entity)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.qbo_service"):
+        page = asyncio.run(
+            svc._fetch_all_pages(
+                entity, client=object(), clause=None, op="walk", max_pages=2
+            )
+        )
+
+    assert len(page.rows) == 2 * PAGE, "the walk's rows must survive a COUNT fault"
+    assert page.total is None
+    assert page.has_more is True
+    assert [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
+def test_recurring_transaction_has_no_id_to_order_by():
+    """Why /api/recurring-transactions/ stays on the unpaged path.
+
+    RecurringTransaction is a wrapper, not a row — it holds a class_dict of
+    twelve wrapped types, and live rows arrive shaped `{"JournalEntry": {...}}`.
+    `_query_page` orders by `Id`, which is the whole reason an offset means the
+    same thing on two requests, so paging this entity gets either a fault (a
+    working 200 becomes a catch-all 500) or a silently ignored ORDERBY, where
+    `offset` no-ops while the headers promise a cursor and the caller
+    reassembles duplicates.
+
+    Checked on an INSTANCE, not the class. python-quickbooks assigns `Id` in
+    `__init__`, so `hasattr(SomeEntity, "Id")` is False for every entity in the
+    SDK including the pageable ones — an assertion against the class passes
+    always and pins nothing. BillPayment is asserted alongside it precisely so
+    this test fails if that ever stops discriminating.
+    """
+    from quickbooks.objects.billpayment import BillPayment
+    from quickbooks.objects.recurringtransaction import RecurringTransaction
+
+    assert hasattr(BillPayment(), "Id"), (
+        "control case broke: a pageable entity must expose Id, or the "
+        "assertion below proves nothing"
+    )
+    assert not hasattr(RecurringTransaction(), "Id"), (
+        "RecurringTransaction grew an Id — re-check whether it can now be paged"
+    )
+
+
+def _router_schema(module):
+    """Generated OpenAPI for one router, independent of app.main.
+
+    Not `app.main.app` — it mounts StaticFiles from a relative path, so
+    importing it only works with the working directory set to fortium-qbo,
+    and the suite is run from the repo root. The router objects are the thing
+    under test anyway: the offset parameter is declared on the handler.
+    """
+    app = FastAPI()
+    app.include_router(module.router)
+    return app.openapi()
+
+
+def test_the_unpageable_endpoints_advertise_no_cursor():
+    """Asserted against generated OpenAPI, not this module's own constants.
+
+    The first version of this test read LIST_IDS and ENDPOINTS — the test file
+    checking itself, so paging the recurring router without editing those
+    lists would have left the suite green. Reading what the router actually
+    publishes is the only version that can catch what it is for.
+    """
+    from app.routers import recurring
+
+    rec = _router_schema(recurring)["paths"]["/recurring-transactions/"]["get"]
+    assert "offset" not in {q["name"] for q in rec.get("parameters", [])}, (
+        "recurring-transactions must not advertise a cursor it cannot honour"
+    )
+
+    bb = _router_schema(bill_payments)["paths"]["/bill-payments/by-bill/{bill_id}"]["get"]
+    assert "offset" not in {q["name"] for q in bb.get("parameters", [])}, (
+        "by-bill resolves through LinkedTxn and must not gain a cursor"
+    )
+
+    # The positive direction, so this also fails if paging is lost wholesale
+    # rather than only if it spreads somewhere it should not.
+    paged = _router_schema(journal_entries)["paths"]["/journal-entries/"]["get"]
+    assert "offset" in {q["name"] for q in paged.get("parameters", [])}
+    assert "X-Has-More" in paged["responses"]["200"]["headers"]
+
+
+def test_the_unpaged_endpoint_still_refuses_a_zero_page():
+    """max_results=0 is falsy in ListMixin.all, which drops the MAXRESULTS
+    clause entirely and lets QuickBooks answer with its own default — fewer
+    rows than asked for, inside a 200, with no X-Has-More to contradict it.
+    The paged endpoints got ge=1 from the conversion; this one needed it
+    stated separately because it is the one that keeps no header."""
+    from app.routers import recurring
+
+    rec = _router_schema(recurring)["paths"]["/recurring-transactions/"]["get"]
+    mr = next(q for q in rec["parameters"] if q["name"] == "max_results")
+    assert mr["schema"]["minimum"] == 1
 
 
 @pytest.mark.parametrize(
