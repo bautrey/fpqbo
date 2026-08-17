@@ -501,6 +501,14 @@ class QBOService:
         `_to_thread_with_retry` uses, so a degrading COUNT and its retries
         correlate.
 
+        At ERROR, not WARNING: this branch is only reached once
+        `_to_thread_with_retry` has exhausted its attempts or judged the fault
+        non-transient, which is the terminal case. This module already draws
+        that line — the retry loop warns per attempt, and a refresh that
+        finally fails logs an error. A COUNT faulting on every request strips
+        X-Total-Count from every list response indefinitely, and there is no
+        error tracking in this service to catch it above the log.
+
         `except Exception` and not BaseException: `asyncio.CancelledError`
         derives from BaseException, so a cancelled request still unwinds
         rather than being recorded as an unknown count.
@@ -512,7 +520,7 @@ class QBOService:
         try:
             return await self._to_thread_with_retry(_count, op=f"{op}_count")
         except Exception:
-            logger.warning(
+            logger.error(
                 "%s_count failed; serving the rows with an unknown total", op,
                 exc_info=True,
             )

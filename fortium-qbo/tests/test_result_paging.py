@@ -895,7 +895,7 @@ def test_a_failed_count_still_serves_the_page_it_already_has(monkeypatch, caplog
     entity = _CountFaultingEntity(ledger_size=27_187)
     svc = _service(monkeypatch, "Bill", entity)
 
-    with caplog.at_level(logging.WARNING, logger="app.services.qbo_service"):
+    with caplog.at_level(logging.ERROR, logger="app.services.qbo_service"):
         page = asyncio.run(svc.get_bills(company_id=1))
 
     assert len(page.rows) == PAGE, "the page QBO served must survive a COUNT fault"
@@ -904,7 +904,9 @@ def test_a_failed_count_still_serves_the_page_it_already_has(monkeypatch, caplog
     assert page.next_offset == PAGE
 
     # Degrading quietly would look identical to QBO declining to count.
-    assert [r for r in caplog.records if r.levelno == logging.WARNING], (
+    # ERROR, not WARNING: this branch is only reached once the retries are
+    # exhausted, which is the terminal case this module logs at ERROR.
+    assert [r for r in caplog.records if r.levelno == logging.ERROR], (
         "a COUNT that faults every time must leave a server-side trace"
     )
 
@@ -925,7 +927,7 @@ def test_a_failed_count_does_not_discard_a_completed_walk(monkeypatch, caplog):
     entity = _CountFaultingEntity(ledger_size=2500)
     svc = _service(monkeypatch, "Invoice", entity)
 
-    with caplog.at_level(logging.WARNING, logger="app.services.qbo_service"):
+    with caplog.at_level(logging.ERROR, logger="app.services.qbo_service"):
         page = asyncio.run(
             svc._fetch_all_pages(
                 entity, client=object(), clause=None, op="walk", max_pages=2
@@ -935,7 +937,7 @@ def test_a_failed_count_does_not_discard_a_completed_walk(monkeypatch, caplog):
     assert len(page.rows) == 2 * PAGE, "the walk's rows must survive a COUNT fault"
     assert page.total is None
     assert page.has_more is True
-    assert [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert [r for r in caplog.records if r.levelno == logging.ERROR]
 
 
 def test_recurring_transaction_has_no_id_to_order_by():
