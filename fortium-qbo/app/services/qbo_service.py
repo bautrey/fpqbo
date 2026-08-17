@@ -526,7 +526,29 @@ class QBOService:
                 rows=rows, offset=offset, total=offset + len(rows), has_more=False
             )
 
-        total = await self._count_matching(entity, client=client, clause=clause, op=op)
+        try:
+            total = await self._count_matching(
+                entity, client=client, clause=clause, op=op
+            )
+        except Exception:
+            # The page is already in hand and QuickBooks answered it. A COUNT
+            # that faults leaves the SIZE unknown, not the page invalid, and
+            # "size unknown" is a state PagedResult already models — it is what
+            # a COUNT answered without a totalCount produces. Letting this
+            # propagate instead discards rows QBO successfully returned and
+            # turns a served page into a 500 through the router's catch-all.
+            #
+            # Logged rather than swallowed: `total is None` below makes
+            # has_more True, so the caller is told the set may continue, which
+            # is the safe reading. But a COUNT failing every time is a real
+            # fault and would otherwise be invisible — the response looks
+            # exactly like QBO declining to count.
+            logger.warning(
+                "COUNT failed for %s; serving the page with an unknown total",
+                op,
+                exc_info=True,
+            )
+            total = None
         if overshot:
             # has_more stays False even when the COUNT went unanswered. The
             # empty page is itself the proof that no row exists at or past this
