@@ -52,17 +52,22 @@ __all__ = [
 class QboQueryError(Exception):
     """A QBO query clause could not be built from what the caller passed.
 
-    Deliberately not a ``ValueError``. In this service ``ValueError`` is the
-    record-not-found signal — ``qbo_service`` raises it for "QBO company not
-    found" and "Bill not found", and around thirty router handlers turn it
-    verbatim into a 404. A bad field name raised as a ``ValueError`` would
-    answer ``404 {"detail": "Not a QBO field name: 'Doc Number'"}``, and
-    anything routing on the status code would record "this record does not
-    exist" and move on. That is the defect class this module exists to close,
-    relocated from the query into the error channel: a confident wrong answer
-    that reads like a normal negative result. ``routers/invoices.py`` carries
-    a comment about the last time this happened, when a ``float()`` failure
-    inside a ``try`` became "no such company".
+    Deliberately not a ``ValueError``. When this class was written, ``ValueError``
+    was the record-not-found signal throughout the service — ``qbo_service``
+    raised it for "QBO company not found" and "Bill not found", and around
+    eighty router handlers turned it verbatim into a 404. A bad field name
+    raised as a ``ValueError`` would have answered ``404 {"detail": "Not a QBO
+    field name: 'Doc Number'"}``, and anything routing on the status code would
+    record "this record does not exist" and move on.
+
+    That channel is gone as of #15: not-found is now ``QboNotFound`` in
+    ``app/exceptions.py``, no ``raise ValueError`` remains in ``qbo_service``,
+    and the ``except ValueError -> 404`` clauses were removed. So the original
+    hazard no longer exists — but staying outside the ``ValueError``/``TypeError``
+    hierarchy is still correct, and for a reason that outlives it: a query this
+    module refuses to build is a programmer error, and the only honest answer
+    is a 500. Being catchable as a ``ValueError`` would invite exactly the
+    reclassification that took eighty handlers to undo.
 
     None of the conditions raised here is a caller-data condition. Field names
     and operators are module constants at every call site, and the ids come

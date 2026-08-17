@@ -136,6 +136,19 @@ def _txn_date_clause(
     return " AND ".join(clauses) if clauses else None
 
 
+# token_status values meaning "a human has to reconnect THIS company", as
+# distinct from "this whole service is misconfigured". `disconnected` is set by
+# the admin Disconnect button and `expired` by a failed manual refresh; both are
+# terminal until someone re-authorises at /admin/companies.
+#
+# `refresh_failed` is deliberately NOT here. _refresh_token sets it on any
+# exception, including a transient Intuit blip, so treating it as terminal would
+# let one bad network moment brick a company until a human intervened. Those
+# companies still attempt a refresh; if that attempt fails they get a 409 from
+# the raise site itself, which is the accurate answer without being sticky.
+RECONNECT_REQUIRED_STATUSES = frozenset({"disconnected", "expired"})
+
+
 def _active_clause(active_only: bool) -> str | None:
     """Build the Active portion of a QBO query, or None for everything.
 
@@ -224,9 +237,17 @@ class QBOService:
         company = self.db.query(QboCompany).filter(QboCompany.id == company_id).first()
         if not company:
             raise QboNotFound(f"QBO company not found: {company_id}")
-        if company.token_status == "disconnected":
+        if company.token_status in RECONNECT_REQUIRED_STATUSES:
+            # Logged for the same reason the QboUnavailable sites are: a sync
+            # job that swallows the status leaves no trace that a company
+            # stopped working.
+            logger.error(
+                "QBO company %s needs reconnecting (token_status=%s)",
+                company.code, company.token_status,
+            )
             raise QboCompanyDisconnected(
-                f"QBO company {company.code} is disconnected. "
+                f"QBO company {company.code} needs reconnecting "
+                f"(token_status={company.token_status}). "
                 "Please reconnect via /admin/companies."
             )
         return company
@@ -257,9 +278,15 @@ class QBOService:
         company = self.db.query(QboCompany).filter(QboCompany.code == code).first()
         if not company:
             raise QboNotFound(f"QBO company not found: {code}")
-        if company.token_status == "disconnected":
+        if company.token_status in RECONNECT_REQUIRED_STATUSES:
+            logger.error(
+                "QBO company %s needs reconnecting (token_status=%s)",
+                code, company.token_status,
+            )
             raise QboCompanyDisconnected(
-                f"QBO company {code} is disconnected. Please reconnect via /admin/companies."
+                f"QBO company {code} needs reconnecting "
+                f"(token_status={company.token_status}). "
+                "Please reconnect via /admin/companies."
             )
         return company
 
@@ -327,9 +354,14 @@ class QBOService:
                 logger.error(f"Failed to update token_status: {db_error}")
                 self.db.rollback()
 
-            raise QboUnavailable(
-                f"Token refresh failed for {company.code}. "
-                f"Please reconnect at /admin/companies. Error: {e}"
+            # 409, not 503. This message already tells the caller to reconnect
+            # one named company; answering with the same status as "QBO
+            # credentials not configured" is precisely the collapse this change
+            # exists to undo. 503 is now reserved for the service being
+            # misconfigured, which no reconnect can fix.
+            raise QboCompanyDisconnected(
+                f"QBO company {company.code} needs reconnecting: token refresh "
+                f"failed. Please reconnect at /admin/companies. Error: {e}"
             )
 
     def _get_client(self, company: QboCompany) -> QuickBooks:

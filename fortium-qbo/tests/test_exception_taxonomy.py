@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 from app.dependencies.api_auth import verify_api_key
 from app.exceptions import QboCompanyDisconnected, QboNotFound, QboUnavailable
 from app.routers import vendors
-from app.services.qbo_service import QBOService
+from app.services.qbo_service import RECONNECT_REQUIRED_STATUSES, QBOService
 
 
 def _run(coro):
@@ -121,6 +121,119 @@ def test_a_disconnected_company_is_not_reported_as_missing(lookup):
         "409 must stay distinguishable from 'credentials not configured'"
     )
     assert "reconnect" in str(caught.value.detail).lower()
+
+
+def test_the_reconnect_states_are_the_ones_we_meant():
+    """Spelled out, not read from the constant under test.
+
+    The first version parametrized the test below over
+    RECONNECT_REQUIRED_STATUSES itself, so shrinking the constant back to
+    {"disconnected"} — reintroducing the exact bug this pass fixed — just ran
+    one fewer case and stayed green. A test that sources its expectation from
+    the thing it is testing cannot fail. Found by mutation, not by reading it.
+    """
+    assert RECONNECT_REQUIRED_STATUSES == {"disconnected", "expired"}
+
+
+@pytest.mark.parametrize("status", ["disconnected", "expired"])
+def test_every_reconnect_state_answers_409_not_just_the_manual_one(status):
+    """`disconnected` is the state an admin sets by clicking a button.
+
+    The first version of this gate checked only that one, so the states that
+    arise on their own — a manual refresh failing sets `expired` — fell
+    through to `_refresh_token` and came back 503, the same number as "this
+    service is misconfigured". Those are the common cases and the ones a
+    monitor most needs to tell apart, so gating on the manual state alone
+    fixed the rarest instance of the problem.
+    """
+    company = SimpleNamespace(id=1, code="FOR-138", token_status=status)
+
+    with pytest.raises(QboCompanyDisconnected) as caught:
+        _svc(company=company)._get_company(1)
+
+    assert caught.value.status_code == 409
+    assert status in str(caught.value.detail), (
+        "the detail should name the state, or the admin cannot tell which "
+        "kind of reconnect is needed"
+    )
+
+
+def test_an_active_company_is_not_blocked():
+    """The gate must not refuse the companies that are working."""
+    company = SimpleNamespace(id=1, code="FOR-138", token_status="active")
+    assert _svc(company=company)._get_company(1) is company
+
+
+def test_a_failed_refresh_says_reconnect_this_company_not_service_broken(monkeypatch):
+    """The status a real expiry actually produces, which nothing covered.
+
+    `_refresh_token` raising is the common way a company stops working — far
+    commoner than an admin clicking Disconnect. It used to raise
+    QboUnavailable, so it answered 503: the same number as "QBO credentials
+    not configured", which is a whole-service problem no reconnect can fix.
+    Its own message says "Please reconnect at /admin/companies", so the 503
+    contradicted the text it shipped with.
+    """
+    company = SimpleNamespace(
+        id=1, code="FOR-138", region="US", is_sandbox=False,
+        token_status="active", access_token="a", refresh_token="r", realm_id="1",
+    )
+    svc = _svc(company=company)
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        def refresh(self):
+            raise RuntimeError("invalid_grant")
+
+    monkeypatch.setattr("app.services.qbo_service.AuthClient", _Boom)
+    monkeypatch.setattr(
+        "app.services.qbo_service.settings",
+        SimpleNamespace(
+            get_qbo_credentials=lambda region, is_sandbox=False: ("id", "sec"),
+            qbo_callback_url="https://example.invalid/callback",
+        ),
+    )
+    svc.db = SimpleNamespace(
+        query=svc.db.query, commit=lambda: None, rollback=lambda: None
+    )
+
+    with pytest.raises(QboCompanyDisconnected) as caught:
+        svc._refresh_token(company)
+
+    assert caught.value.status_code == 409
+    assert caught.value.status_code != 503, (
+        "a company needing reconnection must not read as a misconfigured service"
+    )
+    assert "reconnect" in str(caught.value.detail).lower()
+
+
+def test_a_transient_refresh_failure_does_not_brick_the_company():
+    """`refresh_failed` is deliberately not a terminal state.
+
+    `_refresh_token` sets it on ANY exception, including a transient Intuit
+    blip. Treating it as terminal would let one bad network moment lock a
+    company out until a human intervened, so these companies still get a
+    refresh attempt; only if that attempt fails do they get the 409.
+    """
+    assert "refresh_failed" not in RECONNECT_REQUIRED_STATUSES
+    company = SimpleNamespace(id=1, code="FOR-138", token_status="refresh_failed")
+    assert _svc(company=company)._get_company(1) is company
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [QboNotFound("x"), QboCompanyDisconnected("x"), QboUnavailable("x")],
+    ids=["not-found", "disconnected", "unavailable"],
+)
+def test_none_of_the_typed_exceptions_is_retried(exc):
+    """They are all deterministic — retrying wastes ~3.4s of backoff per call
+    and cannot change the answer. True today only because no branch in
+    `_is_transient_qbo_error` matches them, which is worth pinning."""
+    from app.services.qbo_service import _is_transient_qbo_error
+
+    assert _is_transient_qbo_error(exc) is False
 
 
 def test_a_disconnected_company_reaches_the_caller_as_409_through_a_route():
@@ -321,9 +434,13 @@ def test_every_catch_all_router_handler_lets_a_deliberate_status_through():
                 unresolvable.append(path.name)
 
         # Only modules that can actually receive the typed exceptions need the
-        # guard — it is reached through QBOService. Globbing every router is
-        # what pulled the OAuth modules in.
-        touches_service = "QBOService" in src or "qbo_service" in src
+        # guard — it arrives through QBOService. Globbing every router is what
+        # pulled the OAuth modules in. _qbo_write.py names neither symbol yet
+        # wraps every write endpoint's call, so it is included explicitly
+        # rather than left to the substring test.
+        touches_service = (
+            "QBOService" in src or "qbo_service" in src or path.name == "_qbo_write.py"
+        )
         if not touches_service:
             continue
 
