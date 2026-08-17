@@ -137,8 +137,9 @@ LIST_METHODS = [
     # unfiltered one, including that the COUNT is taken over the same filter.
     ("Vendor", "get_vendors"),
     ("Account", "get_accounts"),
-    # The twelve from #12. No date range and no Active filter — they page on
-    # offset alone, which is the plainest form of everything asserted here.
+    # The group from #12 and its follow-up comment (the issue body names
+    # four; the comment expands it). No date range and no Active filter —
+    # they page on offset alone, the plainest form of everything below.
     ("JournalEntry", "get_journal_entries"),
     ("BillPayment", "get_bill_payments"),
     ("Deposit", "get_deposits"),

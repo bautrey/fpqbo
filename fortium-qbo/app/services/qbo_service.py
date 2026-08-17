@@ -2424,7 +2424,7 @@ class QBOService:
     ) -> list[dict[str, Any]]:
         """Get recurring transactions. Deliberately NOT paged — see below.
 
-        This is the one entity in the #12 group that cannot go through
+        This is the one entity in the group #12 covers that cannot go through
         `_fetch_page`. RecurringTransaction is a wrapper, not a row: the SDK
         class carries no `Id` field, only a `class_dict` mapping a wrapped
         type name to a Recurring<Type>, and live rows come back shaped
@@ -2440,9 +2440,9 @@ class QBOService:
 
         Not paging costs nothing here. These are scheduling templates, not a
         ledger: measured against production on 2026-08-17 the four connected
-        companies hold 14, 0, 0 and 0 of them. The 1000-row ceiling #12 is
-        about is not reachable, so the truncation this endpoint could suffer
-        is theoretical while the paging breakage would be immediate.
+        companies hold 14, 0, 0 and 0 of them. The 1000-row ceiling that #12
+        is about is not reachable here, so the truncation this endpoint could
+        suffer is theoretical while the paging breakage would be immediate.
         """
         company = self._get_company(company_id)
         client = self._get_client(company)
