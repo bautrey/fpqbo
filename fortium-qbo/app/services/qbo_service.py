@@ -1227,16 +1227,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_bill_payments(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of bill payments."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return BillPayment.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_bill_payments")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            BillPayment,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_bill_payments",
+        )
 
     async def get_bill_payment_by_id(
         self, company_id: int, entity_id: int
@@ -1417,16 +1423,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_credit_memos(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of credit memos."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return CreditMemo.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_credit_memos")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            CreditMemo,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_credit_memos",
+        )
 
     async def get_credit_memo_by_id(
         self, company_id: int, entity_id: int
@@ -1445,16 +1457,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_deposits(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of deposits."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Deposit.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_deposits")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            Deposit,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_deposits",
+        )
 
     async def get_deposit_by_id(
         self, company_id: int, entity_id: int
@@ -1473,16 +1491,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_estimates(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of estimates."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Estimate.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_estimates")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            Estimate,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_estimates",
+        )
 
     async def get_estimate_by_id(
         self, company_id: int, entity_id: int
@@ -1501,16 +1525,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_journal_entries(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of journal entries."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return JournalEntry.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_journal_entries")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            JournalEntry,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_journal_entries",
+        )
 
     async def get_journal_entry_by_id(
         self, company_id: int, entity_id: int
@@ -1698,16 +1728,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_purchase_orders(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of purchase orders."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return PurchaseOrder.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_purchase_orders")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            PurchaseOrder,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_purchase_orders",
+        )
 
     async def get_purchase_order_by_id(
         self, company_id: int, entity_id: int
@@ -1726,16 +1762,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_refund_receipts(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of refund receipts."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return RefundReceipt.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_refund_receipts")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            RefundReceipt,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_refund_receipts",
+        )
 
     async def get_refund_receipt_by_id(
         self, company_id: int, entity_id: int
@@ -1754,16 +1796,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_sales_receipts(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of sales receipts."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return SalesReceipt.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_sales_receipts")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            SalesReceipt,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_sales_receipts",
+        )
 
     async def get_sales_receipt_by_id(
         self, company_id: int, entity_id: int
@@ -1782,16 +1830,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_transfers(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of transfers."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Transfer.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_transfers")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            Transfer,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_transfers",
+        )
 
     async def get_transfer_by_id(
         self, company_id: int, entity_id: int
@@ -1810,16 +1864,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_vendor_credits(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of vendor credits."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return VendorCredit.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_vendor_credits")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            VendorCredit,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_vendor_credits",
+        )
 
     async def get_vendor_credit_by_id(
         self, company_id: int, entity_id: int
@@ -1990,16 +2050,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_time_activities(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of time activities."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return TimeActivity.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_time_activities")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            TimeActivity,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_time_activities",
+        )
 
     async def get_time_activity_by_id(
         self, company_id: int, entity_id: int
@@ -2325,16 +2391,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_recurring_transactions(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of recurring transactions."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return RecurringTransaction.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_recurring_transactions")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            RecurringTransaction,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_recurring_transactions",
+        )
 
     async def get_recurring_transaction_by_id(
         self, company_id: int, entity_id: int

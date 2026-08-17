@@ -27,7 +27,26 @@ from fastapi.testclient import TestClient
 from quickbooks.mixins import ListMixin
 
 from app.dependencies.api_auth import verify_api_key
-from app.routers import accounts, bills, invoices, payments, purchases, vendors
+from app.routers import (
+    accounts,
+    bill_payments,
+    bills,
+    credit_memos,
+    deposits,
+    estimates,
+    invoices,
+    journal_entries,
+    payments,
+    purchase_orders,
+    purchases,
+    recurring,
+    refund_receipts,
+    sales_receipts,
+    time_activities,
+    transfers,
+    vendor_credits,
+    vendors,
+)
 from app.services.qbo_service import QBOService
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult, apply_paging_headers
 
@@ -118,6 +137,20 @@ LIST_METHODS = [
     # unfiltered one, including that the COUNT is taken over the same filter.
     ("Vendor", "get_vendors"),
     ("Account", "get_accounts"),
+    # The twelve from #12. No date range and no Active filter — they page on
+    # offset alone, which is the plainest form of everything asserted here.
+    ("JournalEntry", "get_journal_entries"),
+    ("BillPayment", "get_bill_payments"),
+    ("Deposit", "get_deposits"),
+    ("VendorCredit", "get_vendor_credits"),
+    ("PurchaseOrder", "get_purchase_orders"),
+    ("CreditMemo", "get_credit_memos"),
+    ("SalesReceipt", "get_sales_receipts"),
+    ("RefundReceipt", "get_refund_receipts"),
+    ("Estimate", "get_estimates"),
+    ("Transfer", "get_transfers"),
+    ("RecurringTransaction", "get_recurring_transactions"),
+    ("TimeActivity", "get_time_activities"),
 ]
 LIST_IDS = [method for _, method in LIST_METHODS]
 
@@ -536,6 +569,19 @@ ENDPOINTS = [
     (invoices, "/invoices/"),
     (vendors, "/vendors/"),
     (accounts, "/accounts/"),
+    (journal_entries, "/journal-entries/"),
+    (bill_payments, "/bill-payments/"),
+    (deposits, "/deposits/"),
+    (vendor_credits, "/vendor-credits/"),
+    (purchase_orders, "/purchase-orders/"),
+    (credit_memos, "/credit-memos/"),
+    (sales_receipts, "/sales-receipts/"),
+    (refund_receipts, "/refund-receipts/"),
+    (estimates, "/estimates/"),
+    (transfers, "/transfers/"),
+    # Route prefix is /recurring-transactions, not /recurring.
+    (recurring, "/recurring-transactions/"),
+    (time_activities, "/time-activities/"),
 ]
 ENDPOINT_IDS = [path.strip("/") for _, path in ENDPOINTS]
 
