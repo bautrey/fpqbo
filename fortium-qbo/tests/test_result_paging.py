@@ -39,7 +39,6 @@ from app.routers import (
     payments,
     purchase_orders,
     purchases,
-    recurring,
     refund_receipts,
     sales_receipts,
     time_activities,
@@ -152,7 +151,7 @@ LIST_METHODS = [
     ("TimeActivity", "get_time_activities"),
     # RecurringTransaction is NOT here, and must not be added. It is a wrapper
     # with no top-level Id, so it cannot be ordered by the key that makes an
-    # offset stable. See test_recurring_transactions_is_not_paged below and
+    # offset stable. See test_recurring_transaction_has_no_id_to_order_by and
     # the docstring on QBOService.get_recurring_transactions.
 ]
 LIST_IDS = [method for _, method in LIST_METHODS]
@@ -584,7 +583,7 @@ ENDPOINTS = [
     (transfers, "/transfers/"),
     (time_activities, "/time-activities/"),
     # /recurring-transactions/ is NOT here — it is not paged. See
-    # test_recurring_transactions_is_not_paged below.
+    # test_the_unpageable_endpoints_advertise_no_cursor.
 ]
 ENDPOINT_IDS = [path.strip("/") for _, path in ENDPOINTS]
 
@@ -874,30 +873,54 @@ def test_the_total_counts_only_the_filtered_set(monkeypatch, attr, method):
     assert entity.count_calls == ["Active = true"]
 
 
-def test_recurring_transactions_is_not_paged():
-    """The one entity in the #12 group that must stay on the unpaged path.
+def test_recurring_transaction_has_no_id_to_order_by():
+    """Why /api/recurring-transactions/ stays on the unpaged path.
 
-    RecurringTransaction is a wrapper, not a row — the SDK class defines no
-    `Id`, and live rows arrive shaped `{"JournalEntry": {...}}`. `_query_page`
-    orders by `Id`, which is the whole reason an offset means the same thing
-    twice, so paging this entity gets either a fault (a working 200 becomes a
-    catch-all 500) or a silently ignored ORDERBY, where `offset` no-ops while
-    the headers promise a cursor and the caller reassembles duplicates.
+    RecurringTransaction is a wrapper, not a row — it holds a class_dict of
+    twelve wrapped types, and live rows arrive shaped `{"JournalEntry": {...}}`.
+    `_query_page` orders by `Id`, which is the whole reason an offset means the
+    same thing on two requests, so paging this entity gets either a fault (a
+    working 200 becomes a catch-all 500) or a silently ignored ORDERBY, where
+    `offset` no-ops while the headers promise a cursor and the caller
+    reassembles duplicates.
 
-    Asserted rather than commented because the next sweep over the remaining
-    list endpoints will look exactly like the one that added it here.
+    Checked on an INSTANCE, not the class. python-quickbooks assigns `Id` in
+    `__init__`, so `hasattr(SomeEntity, "Id")` is False for every entity in the
+    SDK including the pageable ones — an assertion against the class passes
+    always and pins nothing. BillPayment is asserted alongside it precisely so
+    this test fails if that ever stops discriminating.
     """
+    from quickbooks.objects.billpayment import BillPayment
     from quickbooks.objects.recurringtransaction import RecurringTransaction
 
-    assert not hasattr(RecurringTransaction, "Id"), (
+    assert hasattr(BillPayment(), "Id"), (
+        "control case broke: a pageable entity must expose Id, or the "
+        "assertion below proves nothing"
+    )
+    assert not hasattr(RecurringTransaction(), "Id"), (
         "RecurringTransaction grew an Id — re-check whether it can now be paged"
     )
-    assert "get_recurring_transactions" not in LIST_IDS, (
-        "recurring-transactions must not join the paged list methods"
-    )
-    assert all(path != "/recurring-transactions/" for _, path in ENDPOINTS), (
-        "recurring-transactions must not join the paged endpoints"
-    )
+
+
+def test_the_unpageable_endpoints_advertise_no_cursor():
+    """Asserted against the real schema, not this module's own constants.
+
+    The earlier version of this test read LIST_IDS and ENDPOINTS, so paging the
+    recurring router without touching those lists would have left the suite
+    green — it checked the test file against itself. Reading the app's
+    generated OpenAPI is the only version that can catch the thing it is for.
+    """
+    from app.main import app
+
+    schema = app.openapi()
+    for path in ("/api/recurring-transactions/", "/api/bill-payments/by-bill/{bill_id}"):
+        params = {q["name"] for q in schema["paths"][path]["get"].get("parameters", [])}
+        assert "offset" not in params, f"{path} must not advertise a cursor it cannot honour"
+
+    # The positive direction, so this test also fails if paging is lost wholesale.
+    paged = schema["paths"]["/api/journal-entries/"]["get"]
+    assert "offset" in {q["name"] for q in paged.get("parameters", [])}
+    assert "X-Has-More" in paged["responses"]["200"]["headers"]
 
 
 @pytest.mark.parametrize(
