@@ -299,14 +299,35 @@ def test_every_catch_all_router_handler_lets_a_deliberate_status_through():
     edit that produced it.
     """
     import ast
+    import importlib
     import pathlib
 
     routers = pathlib.Path(__file__).resolve().parents[1] / "app" / "routers"
     assert routers.is_dir(), routers
 
-    unguarded = []
+    unguarded, misordered, unresolvable = [], [], []
     for path in sorted(routers.glob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text())):
+        src = path.read_text()
+        tree = ast.parse(src)
+
+        # A guard naming a type the module never imported is worse than no
+        # guard: it raises NameError while handling an error, taking out the
+        # recovery path with it. The first version of this test asserted only
+        # that the string appeared as a handler, so it mandated exactly that
+        # in two OAuth modules and then passed.
+        if "except HTTPException:" in src:
+            module = importlib.import_module(f"app.routers.{path.stem}")
+            if not hasattr(module, "HTTPException"):
+                unresolvable.append(path.name)
+
+        # Only modules that can actually receive the typed exceptions need the
+        # guard — it is reached through QBOService. Globbing every router is
+        # what pulled the OAuth modules in.
+        touches_service = "QBOService" in src or "qbo_service" in src
+        if not touches_service:
+            continue
+
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Try):
                 continue
             names = [
@@ -320,10 +341,28 @@ def test_every_catch_all_router_handler_lets_a_deliberate_status_through():
                 continue
             if "HTTPException" not in names:
                 unguarded.append(f"{path.name}:{node.lineno} {names}")
+                continue
+            # Position matters. A guard sitting after the catch-all is dead —
+            # verified by moving reports.py's four below theirs, which broke
+            # every report endpoint while the membership-only check stayed green.
+            catch_all = min(
+                i for i, n in enumerate(names) if n in ("Exception", "bare")
+            )
+            if names.index("HTTPException") > catch_all:
+                misordered.append(f"{path.name}:{node.lineno} {names}")
 
+    assert not unresolvable, (
+        "these modules catch HTTPException without importing it — the handler "
+        "raises NameError and destroys the recovery path:\n  "
+        + "\n  ".join(unresolvable)
+    )
     assert not unguarded, (
         "these handlers rewrap a deliberate 404/409/503 as a 500:\n  "
         + "\n  ".join(unguarded)
+    )
+    assert not misordered, (
+        "the guard is unreachable behind the catch-all in:\n  "
+        + "\n  ".join(misordered)
     )
 
 

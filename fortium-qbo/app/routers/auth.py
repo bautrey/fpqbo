@@ -132,8 +132,6 @@ async def callback(request: Request):
 
         return response
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"OAuth callback error: {e}", exc_info=True)
         return _error_response(

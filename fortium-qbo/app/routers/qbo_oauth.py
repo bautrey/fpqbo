@@ -188,8 +188,6 @@ async def _fetch_company_name(
             response.raise_for_status()
             data = response.json()
             return data.get("CompanyInfo", {}).get("CompanyName", "Unknown Company")
-    except HTTPException:
-        raise
     except Exception as e:
         logger.warning(f"Failed to fetch company info: {e}")
         return "Unknown Company"
@@ -394,8 +392,6 @@ async def qbo_callback(
                 db.commit()
                 logger.info(f"Created new QBO company: {company_code}")
 
-        except HTTPException:
-            raise
         except Exception as e:
             logger.error(f"Database error saving company: {e}", exc_info=True)
             db.rollback()
@@ -409,8 +405,6 @@ async def qbo_callback(
             status_code=302,
         )
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Token exchange error: {e}", exc_info=True)
         return _error_response("Unable to exchange authorization code. Please try again.")
@@ -466,8 +460,6 @@ async def disconnect_company(request: Request, company_id: int):
                             auth=(client_id, client_secret),
                         )
                     logger.info(f"Revoked token with Intuit for company {company_code} (region={company.region})")
-            except HTTPException:
-                raise
             except Exception as e:
                 logger.warning(f"Failed to revoke token with Intuit (best effort): {e}")
 
@@ -486,8 +478,6 @@ async def disconnect_company(request: Request, company_id: int):
             status_code=302,
         )
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error disconnecting company: {e}", exc_info=True)
         db.rollback()
@@ -568,8 +558,6 @@ async def refresh_company_token(request: Request, company_id: int):
                 "expires_at": company.token_expires_at.isoformat(),
             }
 
-        except HTTPException:
-            raise
         except Exception as e:
             logger.error(f"Token refresh failed for {company.code}: {e}", exc_info=True)
 
@@ -583,8 +571,6 @@ async def refresh_company_token(request: Request, company_id: int):
                 "reconnect_required": True,
             }
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error refreshing company token: {e}", exc_info=True)
         db.rollback()

@@ -251,7 +251,8 @@ class QBOService:
             QboCompany instance
 
         Raises:
-            ValueError: If company not found or disconnected
+            QboNotFound: no company with that code (404)
+            QboCompanyDisconnected: it exists, authorization revoked (409)
         """
         company = self.db.query(QboCompany).filter(QboCompany.code == code).first()
         if not company:

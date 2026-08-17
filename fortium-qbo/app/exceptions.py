@@ -34,8 +34,15 @@ programmer built a bad query", which has no business being anything but a 500,
 and staying outside the `ValueError`/`TypeError` hierarchy is what guarantees
 no 404 handler can swallow it.
 
-The `except HTTPException: raise` guard is what carries these through, and
-it is present on every handler as of this change.
+The `except HTTPException: raise` guard is what carries these through. It is
+present, and first, on every router handler that can receive one — meaning
+every handler reached through QBOService. It is deliberately NOT added to
+`auth.py` or `qbo_oauth.py`: neither calls QBOService, so neither can see
+these types, and neither imports HTTPException, so a guard naming it there
+would raise NameError while handling an error and take the recovery path
+down with it. Catch-alls elsewhere in the app (database.py, main.py,
+qbo_service.py, token_refresh_scheduler.py) are outside the request path and
+unaffected.
 """
 
 from fastapi import HTTPException

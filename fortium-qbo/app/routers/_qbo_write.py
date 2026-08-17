@@ -61,8 +61,6 @@ async def run_qbo_write(coro: Awaitable[Any], *, entity: str) -> Any:
     try:
         return await coro
     except HTTPException:
-        raise
-    except HTTPException:
         # A specific HTTP error already chosen by the endpoint/service (404, 409,
         # ...) must pass through unchanged — the catch-all below would otherwise
         # mask it as a 500. (HTTPException is a subclass of Exception.)

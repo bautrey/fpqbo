@@ -140,13 +140,16 @@ async def get_trailing_12m_summary(
     end_date = datetime.utcnow()
     start_date = datetime(end_date.year - 1, end_date.month, 1)
 
-    # Only the fetch is caught. The `except ValueError` below is the
-    # unknown-company signal from the service and is answered with a 404; with
-    # the aggregation inside the try, a TotalAmt QBO returned as something
-    # float() will not take was also a ValueError and also became a 404 —
-    # "no such company" to anything routing on the status code. The walk now
-    # reaches 20,000 invoices where it used to stop at 1,000, so there are
-    # twenty times as many values to trip over.
+    # Only the fetch is caught, and it stays that way. Historically the
+    # `except ValueError` here was the unknown-company signal answered with a
+    # 404, so a TotalAmt QBO returned as something float() would not take was
+    # also a ValueError and also became a 404 — "no such company" to anything
+    # routing on the status code. Since #15 the service raises QboNotFound
+    # instead and that clause is gone, so an aggregation failure would now
+    # reach the catch-all as a 500, which is the honest answer. Keeping the
+    # try narrow is still right: the walk reaches 20,000 invoices where it
+    # used to stop at 1,000, so there are twenty times as many values to trip
+    # over, and none of them should be able to colour the fetch's error.
     try:
         page = await qbo.get_all_invoices(
             company_id=company_id,
