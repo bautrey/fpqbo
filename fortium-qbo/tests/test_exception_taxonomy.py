@@ -132,29 +132,39 @@ def test_the_reconnect_states_are_the_ones_we_meant():
     one fewer case and stayed green. A test that sources its expectation from
     the thing it is testing cannot fail. Found by mutation, not by reading it.
     """
-    assert RECONNECT_REQUIRED_STATUSES == {"disconnected", "expired"}
+    assert RECONNECT_REQUIRED_STATUSES == {"disconnected"}
 
 
-@pytest.mark.parametrize("status", ["disconnected", "expired"])
-def test_every_reconnect_state_answers_409_not_just_the_manual_one(status):
-    """`disconnected` is the state an admin sets by clicking a button.
-
-    The first version of this gate checked only that one, so the states that
-    arise on their own — a manual refresh failing sets `expired` — fell
-    through to `_refresh_token` and came back 503, the same number as "this
-    service is misconfigured". Those are the common cases and the ones a
-    monitor most needs to tell apart, so gating on the manual state alone
-    fixed the rarest instance of the problem.
-    """
-    company = SimpleNamespace(id=1, code="FOR-138", token_status=status)
+def test_a_deliberately_disconnected_company_is_refused_before_any_qbo_call():
+    """The one state that means "do not even try": the admin pressed the button."""
+    company = SimpleNamespace(id=1, code="FOR-138", token_status="disconnected")
 
     with pytest.raises(QboCompanyDisconnected) as caught:
         _svc(company=company)._get_company(1)
 
     assert caught.value.status_code == 409
-    assert status in str(caught.value.detail), (
-        "the detail should name the state, or the admin cannot tell which "
-        "kind of reconnect is needed"
+    assert "disconnected" in str(caught.value.detail)
+
+
+@pytest.mark.parametrize("status", ["expired", "refresh_failed"])
+def test_a_stale_token_state_does_not_block_the_self_heal(status):
+    """Both are written by a bare `except Exception` around a refresh.
+
+    A transient Intuit blip sets them, and nothing automatic clears either —
+    the scheduler refreshes only `active`, refresh_all_now only `active` and
+    `refresh_failed`. Gating on them here would turn one bad network moment
+    into a permanent 409, destroying the recovery the company used to have:
+    the next request reaches _get_client, finds the token stale, refreshes it
+    and sets `active` again.
+
+    This test exists because an earlier pass added `expired` to the gate on
+    the reasoning that it "arises automatically so it must be terminal" —
+    exactly backwards. Arising automatically is why it must NOT be.
+    """
+    company = SimpleNamespace(id=1, code="FOR-138", token_status=status)
+
+    assert _svc(company=company)._get_company(1) is company, (
+        f"{status} must reach the refresh path, not be refused up front"
     )
 
 

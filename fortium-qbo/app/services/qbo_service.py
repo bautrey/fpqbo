@@ -136,17 +136,25 @@ def _txn_date_clause(
     return " AND ".join(clauses) if clauses else None
 
 
-# token_status values meaning "a human has to reconnect THIS company", as
-# distinct from "this whole service is misconfigured". `disconnected` is set by
-# the admin Disconnect button and `expired` by a failed manual refresh; both are
-# terminal until someone re-authorises at /admin/companies.
+# token_status values meaning "do not even try this company" — a human has
+# deliberately taken it out of service. Only `disconnected`, which the admin
+# Disconnect button writes.
 #
-# `refresh_failed` is deliberately NOT here. _refresh_token sets it on any
-# exception, including a transient Intuit blip, so treating it as terminal would
-# let one bad network moment brick a company until a human intervened. Those
-# companies still attempt a refresh; if that attempt fails they get a 409 from
-# the raise site itself, which is the accurate answer without being sticky.
-RECONNECT_REQUIRED_STATUSES = frozenset({"disconnected", "expired"})
+# `expired` and `refresh_failed` are deliberately NOT here, and the reason is
+# worth keeping because the obvious change is wrong. Both are written by a bare
+# `except Exception` around a refresh — qbo_oauth.py's manual-refresh handler
+# and _refresh_token respectively — so a single transient Intuit blip sets
+# them. Nothing automatic clears either one: the scheduler only refreshes
+# `active`, and refresh_all_now only `active` and `refresh_failed`. Gating here
+# on `expired` therefore converts one bad network moment into a permanent 409
+# for that company, destroying the self-heal it used to have — a request would
+# reach _get_client, find the token stale, refresh it, and set `active` again.
+#
+# Leaving them out costs nothing in signal. A company whose token really is
+# dead still attempts the refresh, that refresh still fails, and the raise site
+# answers QboCompanyDisconnected (409) with the reason. The status arrives from
+# where the evidence is, rather than from a flag that may be stale.
+RECONNECT_REQUIRED_STATUSES = frozenset({"disconnected"})
 
 
 def _active_clause(active_only: bool) -> str | None:
@@ -241,8 +249,11 @@ class QBOService:
             # Logged for the same reason the QboUnavailable sites are: a sync
             # job that swallows the status leaves no trace that a company
             # stopped working.
-            logger.error(
-                "QBO company %s needs reconnecting (token_status=%s)",
+            # WARNING, not ERROR: this is a steady state already reported to
+            # the caller as a 409, and a sync job polling a disconnected
+            # company would emit ~1440 ERROR lines a day and bury real faults.
+            logger.warning(
+                "QBO company %s is disconnected (token_status=%s)",
                 company.code, company.token_status,
             )
             raise QboCompanyDisconnected(
@@ -279,8 +290,8 @@ class QBOService:
         if not company:
             raise QboNotFound(f"QBO company not found: {code}")
         if company.token_status in RECONNECT_REQUIRED_STATUSES:
-            logger.error(
-                "QBO company %s needs reconnecting (token_status=%s)",
+            logger.warning(
+                "QBO company %s is disconnected (token_status=%s)",
                 code, company.token_status,
             )
             raise QboCompanyDisconnected(
