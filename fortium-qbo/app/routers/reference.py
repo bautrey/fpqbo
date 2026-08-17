@@ -30,6 +30,8 @@ async def list_company_currencies(
         return await qbo.get_company_currencies(company_id=company_id, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -67,6 +69,8 @@ async def list_exchange_rates(
         return await qbo.get_exchange_rates(company_id=company_id, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -85,6 +89,8 @@ async def list_payment_methods(
         return await qbo.get_payment_methods(company_id=company_id, active_only=active_only, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -123,6 +129,8 @@ async def list_terms(
         return await qbo.get_terms(company_id=company_id, active_only=active_only, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -161,6 +169,8 @@ async def list_classes(
         return await qbo.get_classes(company_id=company_id, active_only=active_only, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -198,6 +208,8 @@ async def list_customer_types(
         return await qbo.get_customer_types(company_id=company_id, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 

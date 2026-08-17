@@ -30,6 +30,8 @@ async def list_items(
         return await qbo.get_items(company_id=company_id, active_only=active_only, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 

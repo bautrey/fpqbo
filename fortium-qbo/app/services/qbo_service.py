@@ -64,6 +64,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.qbo_company import QboCompany
+from app.exceptions import QboCompanyDisconnected, QboNotFound, QboUnavailable
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
 from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
 
@@ -209,7 +210,7 @@ class QBOService:
         """Get QBO company by ID."""
         company = self.db.query(QboCompany).filter(QboCompany.id == company_id).first()
         if not company:
-            raise ValueError(f"QBO company not found: {company_id}")
+            raise QboNotFound(f"QBO company not found: {company_id}")
         return company
 
     def _get_company_by_realm(self, realm_id: str) -> QboCompany:
@@ -218,7 +219,7 @@ class QBOService:
             self.db.query(QboCompany).filter(QboCompany.realm_id == realm_id).first()
         )
         if not company:
-            raise ValueError(f"QBO company not found for realm: {realm_id}")
+            raise QboNotFound(f"QBO company not found for realm: {realm_id}")
         return company
 
     def get_company_by_code(self, code: str) -> QboCompany:
@@ -236,9 +237,9 @@ class QBOService:
         """
         company = self.db.query(QboCompany).filter(QboCompany.code == code).first()
         if not company:
-            raise ValueError(f"QBO company not found: {code}")
+            raise QboNotFound(f"QBO company not found: {code}")
         if company.token_status == "disconnected":
-            raise ValueError(
+            raise QboCompanyDisconnected(
                 f"QBO company {code} is disconnected. Please reconnect via /admin/companies."
             )
         return company
@@ -260,7 +261,7 @@ class QBOService:
         )
         if not credentials:
             env_label = "sandbox" if company.is_sandbox else company.region
-            raise ValueError(f"QBO credentials not configured for: {env_label}")
+            raise QboUnavailable(f"QBO credentials not configured for: {env_label}")
 
         client_id, client_secret = credentials
         environment = "sandbox" if company.is_sandbox else "production"
@@ -303,7 +304,7 @@ class QBOService:
                 logger.error(f"Failed to update token_status: {db_error}")
                 self.db.rollback()
 
-            raise ValueError(
+            raise QboUnavailable(
                 f"Token refresh failed for {company.code}. "
                 f"Please reconnect at /admin/companies. Error: {e}"
             )
@@ -322,7 +323,7 @@ class QBOService:
             )
             if not credentials:
                 env_label = "sandbox" if company.is_sandbox else company.region
-                raise ValueError(f"QBO credentials not configured for: {env_label}")
+                raise QboUnavailable(f"QBO credentials not configured for: {env_label}")
 
             client_id, client_secret = credentials
             # Sandbox companies use the "sandbox" environment (Development keys);
@@ -1097,7 +1098,7 @@ class QBOService:
         def _delete():
             bill = Bill.get(bill_id, qb=client)
             if not bill:
-                raise ValueError(f"Bill {bill_id} not found")
+                raise QboNotFound(f"Bill {bill_id} not found")
             return bill.delete(qb=client)
 
         result = await asyncio.to_thread(_delete)
@@ -1121,7 +1122,7 @@ class QBOService:
         def _delete():
             invoice = Invoice.get(invoice_id, qb=client)
             if not invoice:
-                raise ValueError(f"Invoice {invoice_id} not found")
+                raise QboNotFound(f"Invoice {invoice_id} not found")
             return invoice.delete(qb=client)
 
         result = await asyncio.to_thread(_delete)
@@ -1338,7 +1339,7 @@ class QBOService:
         except ObjectNotFoundException as exc:
             # 404, not 500: the caller named a bill that does not exist. Also
             # not `[]` — that would read as "this bill has no payments".
-            raise ValueError(f"Bill not found: {bill_id}") from exc
+            raise QboNotFound(f"Bill not found: {bill_id}") from exc
 
         payment_ids: list[str] = []
         for txn in bill.LinkedTxn:
@@ -1710,7 +1711,7 @@ class QBOService:
         def _void():
             je = JournalEntry.get(entity_id, qb=client)
             if not je:
-                raise ValueError(f"JournalEntry {entity_id} not found")
+                raise QboNotFound(f"JournalEntry {entity_id} not found")
 
             url = "{0}/company/{1}/journalentry".format(client.api_url, client.company_id)
             payload = {

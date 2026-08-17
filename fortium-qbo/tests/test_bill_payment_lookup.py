@@ -32,6 +32,8 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+
+from app.exceptions import QboNotFound
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from quickbooks.exceptions import ObjectNotFoundException
@@ -218,8 +220,11 @@ def test_a_bill_that_does_not_exist_is_not_a_bill_without_payments(monkeypatch):
     payments = _FakeBillPayment(LEDGER)
     svc = _service(monkeypatch, _FakeBill(BILLS), payments)
 
-    with pytest.raises(ValueError, match="Bill not found: 99999999"):
+    # QboNotFound rather than ValueError since #15: the type now carries the
+    # 404 instead of the router inferring one from "any ValueError is a miss".
+    with pytest.raises(QboNotFound, match="Bill not found: 99999999") as caught:
         asyncio.run(svc.get_bill_payments_by_bill_id(company_id=1, bill_id=99999999))
+    assert caught.value.status_code == 404
 
     assert payments.where_calls == []
 

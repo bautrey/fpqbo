@@ -53,6 +53,8 @@ async def list_bill_payments(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
     apply_paging_headers(response, page)
@@ -70,6 +72,8 @@ async def get_bill_payments_by_bill(
         return await qbo.get_bill_payments_by_bill_id(company_id, bill_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 

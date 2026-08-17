@@ -30,6 +30,8 @@ async def list_tax_agencies(
         return await qbo.get_tax_agencies(company_id=company_id, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -67,6 +69,8 @@ async def list_tax_codes(
         return await qbo.get_tax_codes(company_id=company_id, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -104,6 +108,8 @@ async def list_tax_rates(
         return await qbo.get_tax_rates(company_id=company_id, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 

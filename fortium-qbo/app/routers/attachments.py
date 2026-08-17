@@ -28,6 +28,8 @@ async def list_attachments(
         return await qbo.get_attachables(company_id=company_id, max_results=max_results)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 

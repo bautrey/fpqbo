@@ -52,6 +52,8 @@ async def list_time_activities(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
     apply_paging_headers(response, page)
