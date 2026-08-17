@@ -65,7 +65,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.qbo_company import QboCompany
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
-from app.utils.qbo_query import date_bound, id_in, string_equals
+from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,28 @@ def _txn_date_clause(
     if end_date:
         clauses.append(date_bound("TxnDate", "<=", end_date))
     return " AND ".join(clauses) if clauses else None
+
+
+def _active_clause(active_only: bool) -> str | None:
+    """Build the Active portion of a QBO query, or None for everything.
+
+    `boolean_equals` is called before the branch rather than inside it. Testing
+    `if active_only` first would hand the gate a literal `True` and let the
+    caller's own value through unexamined: `_active_clause("false")` built
+    `Active = true`, and `_active_clause(0)` dropped the filter and returned
+    every inactive row. Unreachable over HTTP, where FastAPI coerces the query
+    param to `bool` before it arrives — but a type gate its only call site
+    steps around is not a gate.
+
+    These endpoints used to reach QuickBooks through `Entity.filter(...)`,
+    which does go through `where()` but builds its clause with the SDK's
+    `build_where_clause` — the helper `qbo_query` exists to replace, since it
+    escapes a quote and leaves a backslash alone. The unfiltered branch used
+    `all()`, whose ORDERBY spelling differs from `where()`'s. One clause
+    builder and one dialect now.
+    """
+    clause = boolean_equals("Active", active_only)
+    return clause if active_only else None
 
 
 def _is_transient_qbo_error(exc: Exception) -> bool:
@@ -427,8 +449,12 @@ class QBOService:
         about it — `ListMixin.where()` emits ` ORDERBY `, `ListMixin.all()`
         emits ` ORDER BY ` — and splitting on `clause` would put two query
         dialects into production, one per code path. `where("")` builds the
-        same SELECT `all()` would, minus an Item/Sku special case that no
-        entity on this path uses (Bill, Invoice, Payment, Purchase).
+        same SELECT `all()` would, minus one special case: `all()` asks for
+        `SELECT *, Sku` when the entity is Item, because QBO leaves Sku out of
+        `*`. No entity on this path is Item (Bill, Invoice, Payment, Purchase,
+        Vendor, Account), so nothing is dropped today — but paging Item means
+        carrying that column onto the clause path first, or every item comes
+        back without its SKU and the response still looks well formed.
         """
 
         def _fetch():
@@ -641,19 +667,23 @@ class QBOService:
         return customer.to_dict() if customer else None
 
     async def get_vendors(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
-        """Get vendors."""
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of vendors, optionally limited to active ones."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return Vendor.filter(Active=True, max_results=max_results, qb=client)
-            return Vendor.all(max_results=max_results, qb=client)
-
-        vendors = await self._to_thread_with_retry(_fetch, op="get_vendors")
-        return [v.to_dict() for v in vendors]
+        return await self._fetch_page(
+            Vendor,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_vendors",
+        )
 
     async def get_vendor_by_id(
         self, company_id: int, vendor_id: int
@@ -927,19 +957,23 @@ class QBOService:
         return result.to_dict()
 
     async def get_accounts(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
-        """Get chart of accounts."""
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the chart of accounts."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return Account.filter(Active=True, max_results=max_results, qb=client)
-            return Account.all(max_results=max_results, qb=client)
-
-        accounts = await self._to_thread_with_retry(_fetch, op="get_accounts")
-        return [a.to_dict() for a in accounts]
+        return await self._fetch_page(
+            Account,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_accounts",
+        )
 
     async def get_account_by_id(
         self, company_id: int, account_id: int

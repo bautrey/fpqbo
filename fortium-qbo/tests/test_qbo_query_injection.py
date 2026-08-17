@@ -36,8 +36,14 @@ from fastapi.testclient import TestClient
 
 from app.dependencies.api_auth import verify_api_key
 from app.routers import bill_payments
-from app.services.qbo_service import QBOService, _txn_date_clause
-from app.utils.qbo_query import QboQueryError, date_bound, id_in, string_equals
+from app.services.qbo_service import QBOService, _active_clause, _txn_date_clause
+from app.utils.qbo_query import (
+    QboQueryError,
+    boolean_equals,
+    date_bound,
+    id_in,
+    string_equals,
+)
 
 # ---------------------------------------------------------------------------
 # Payloads
@@ -330,6 +336,50 @@ def test_a_caller_supplied_field_name_is_refused():
     """The helper is only a gate if the left-hand side is a field name too."""
     with pytest.raises(QboQueryError):
         string_equals("DocNumber = '1' OR DocNumber", "x")
+
+
+def test_a_boolean_renders_unquoted():
+    """QBO's `true` is a boolean; `'true'` is a string that matches nothing.
+
+    A quoted literal here would not error — it would return an empty result
+    set for every active vendor in the file, which is the failure mode this
+    module exists to keep out of the query.
+    """
+    assert boolean_equals("Active", True) == "Active = true"
+    assert boolean_equals("Active", False) == "Active = false"
+
+
+@pytest.mark.parametrize(
+    "payload", ["true", "false", "", 1, 0, None, [], "Active = true OR 1=1"]
+)
+def test_a_boolean_that_is_not_a_bool_is_refused_by_type(payload):
+    """Truthiness is not the test. `if value` would read the string "false"
+    as true and build `Active = true` from it — a clause that answers a
+    different question than the caller asked, with a 200."""
+    with pytest.raises(QboQueryError):
+        boolean_equals("Active", payload)
+
+
+def test_the_active_clause_is_the_filter_it_replaced():
+    """`Entity.filter(Active=True)` became a where-clause so the read could
+    page. The clause has to mean the same thing the filter did."""
+    assert _active_clause(True) == "Active = true"
+    assert _active_clause(False) is None
+
+
+@pytest.mark.parametrize("payload", ["false", "true", 1, 0, None, []])
+def test_the_active_clause_does_not_step_around_its_own_type_gate(payload):
+    """The gate has to run before the branch, not inside it.
+
+    Testing `if active_only` first hands `boolean_equals` a literal True and
+    never shows it the caller's value: `"false"` built `Active = true`, and
+    `0` returned None, dropping the filter and every inactive row with it.
+    FastAPI coerces the query param before it reaches here, so this is not
+    reachable over HTTP — which is exactly why it needs a test rather than a
+    404 in production to find it.
+    """
+    with pytest.raises(QboQueryError):
+        _active_clause(payload)
 
 
 # ---------------------------------------------------------------------------

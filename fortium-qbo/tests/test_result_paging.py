@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 from quickbooks.mixins import ListMixin
 
 from app.dependencies.api_auth import verify_api_key
-from app.routers import bills, invoices, payments, purchases
+from app.routers import accounts, bills, invoices, payments, purchases, vendors
 from app.services.qbo_service import QBOService
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult, apply_paging_headers
 
@@ -112,8 +112,33 @@ LIST_METHODS = [
     ("Purchase", "get_purchases"),
     ("Invoice", "get_invoices"),
     ("Payment", "get_payments"),
+    # Vendor and Account carry a default `active_only=True` clause rather than
+    # no clause. Everything asserted below holds either way — the point of
+    # listing them here is that a filtered read pages exactly like an
+    # unfiltered one, including that the COUNT is taken over the same filter.
+    ("Vendor", "get_vendors"),
+    ("Account", "get_accounts"),
 ]
 LIST_IDS = [method for _, method in LIST_METHODS]
+
+# The subset that takes a date range. Vendors and accounts are not
+# transactions and carry no TxnDate, so a date-filtered assertion has nothing
+# to say about them. Named rather than sliced off LIST_METHODS: a positional
+# slice keeps returning four entries as that list grows, so an entity inserted
+# ahead of the cut would quietly swap itself in for one of these and the
+# date-clause assertion would stop covering a transaction endpoint without a
+# single test going red.
+TXN_LIST_METHODS = [
+    ("Bill", "get_bills"),
+    ("Purchase", "get_purchases"),
+    ("Invoice", "get_invoices"),
+    ("Payment", "get_payments"),
+]
+TXN_LIST_IDS = [method for _, method in TXN_LIST_METHODS]
+
+# The subset whose default read is filtered rather than unfiltered.
+ACTIVE_LIST_METHODS = [("Vendor", "get_vendors"), ("Account", "get_accounts")]
+ACTIVE_LIST_IDS = [method for _, method in ACTIVE_LIST_METHODS]
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +315,7 @@ def test_an_empty_first_page_is_an_empty_result_set_not_an_overshoot(
     assert entity.count_calls == []
 
 
-@pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
+@pytest.mark.parametrize("attr,method", TXN_LIST_METHODS, ids=TXN_LIST_IDS)
 def test_the_count_query_carries_the_same_where_clause_as_the_page(
     monkeypatch, attr, method
 ):
@@ -509,6 +534,8 @@ ENDPOINTS = [
     (purchases, "/purchases/"),
     (payments, "/payments/"),
     (invoices, "/invoices/"),
+    (vendors, "/vendors/"),
+    (accounts, "/accounts/"),
 ]
 ENDPOINT_IDS = [path.strip("/") for _, path in ENDPOINTS]
 
@@ -747,3 +774,70 @@ def test_an_unknown_total_omits_the_count_header_but_still_flags_more():
     assert "X-Total-Count" not in response.headers
     assert response.headers["X-Has-More"] == "true"
     assert response.headers["X-Next-Offset"] == str(PAGE)
+
+
+# ---------------------------------------------------------------------------
+# active_only: the filter that used to be `Entity.filter(Active=True)`
+#
+# Vendors and accounts are the two endpoints that reached QuickBooks through
+# `filter()` rather than `where()`. Paging them meant moving the filter into a
+# clause, and a clause that silently went missing would page correctly over
+# the wrong result set — every inactive vendor included, with a plausible
+# total and a plausible page.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "attr,method", ACTIVE_LIST_METHODS, ids=ACTIVE_LIST_IDS
+)
+def test_active_only_reaches_quickbooks_as_a_where_clause(monkeypatch, attr, method):
+    entity = _FakeEntity(ledger_size=12)
+    svc = _service(monkeypatch, attr, entity)
+
+    asyncio.run(getattr(svc, method)(company_id=1, active_only=True))
+
+    assert entity.queries[0]["where"] == "Active = true"
+
+
+@pytest.mark.parametrize(
+    "attr,method", ACTIVE_LIST_METHODS, ids=ACTIVE_LIST_IDS
+)
+def test_active_only_false_asks_for_everything(monkeypatch, attr, method):
+    entity = _FakeEntity(ledger_size=12)
+    svc = _service(monkeypatch, attr, entity)
+
+    asyncio.run(getattr(svc, method)(company_id=1, active_only=False))
+
+    assert entity.queries[0]["where"] == ""
+
+
+@pytest.mark.parametrize(
+    "attr,method", ACTIVE_LIST_METHODS, ids=ACTIVE_LIST_IDS
+)
+def test_the_total_counts_only_the_filtered_set(monkeypatch, attr, method):
+    """A COUNT over every vendor would report a total the pages never reach,
+    leaving X-Has-More true forever and a caller paging into nothing."""
+    entity = _FakeEntity(ledger_size=27_187)
+    svc = _service(monkeypatch, attr, entity)
+
+    asyncio.run(getattr(svc, method)(company_id=1, active_only=True))
+
+    assert entity.count_calls == ["Active = true"]
+
+
+@pytest.mark.parametrize(
+    "attr,method", ACTIVE_LIST_METHODS, ids=ACTIVE_LIST_IDS
+)
+def test_the_unfiltered_total_counts_the_whole_file(monkeypatch, attr, method):
+    """The mirror of the test above, and it needs a full page to reach.
+
+    `_fetch_page` skips the COUNT entirely on a short page, so a small fake
+    ledger proves nothing about what the COUNT was given — the assertion would
+    pass against an empty count_calls list either way.
+    """
+    entity = _FakeEntity(ledger_size=27_187)
+    svc = _service(monkeypatch, attr, entity)
+
+    asyncio.run(getattr(svc, method)(company_id=1, active_only=False))
+
+    assert entity.count_calls == [""]
