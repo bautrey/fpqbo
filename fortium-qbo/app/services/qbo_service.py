@@ -482,14 +482,41 @@ class QBOService:
     ) -> int | None:
         """Count the rows a query matches in QBO, across all pages.
 
-        Returns None when QBO answers without a `totalCount`; callers treat
-        that as "size unknown", never as "complete".
+        Returns None when the size could not be established, whether because
+        QBO answered without a `totalCount` or because the COUNT itself
+        faulted. Callers treat None as "size unknown", never as "complete".
+
+        Never raises. Both callers reach this only after QuickBooks has
+        already served them rows, so a COUNT that fails leaves the size
+        unknown rather than the page invalid — and letting it propagate
+        discards data QBO successfully returned, turning a served page into a
+        500 through the router's catch-all. In `_fetch_all_pages` that is up
+        to twenty pages of rows thrown away over a failed follow-up query.
+
+        Logged rather than swallowed. `total=None` makes `has_more` True at
+        both call sites, so the caller is told the set may continue, which is
+        the safe reading — but a COUNT failing every time is a real fault and
+        the response is otherwise indistinguishable from QBO declining to
+        count. The log line carries the same `{op}_count` label
+        `_to_thread_with_retry` uses, so a degrading COUNT and its retries
+        correlate.
+
+        `except Exception` and not BaseException: `asyncio.CancelledError`
+        derives from BaseException, so a cancelled request still unwinds
+        rather than being recorded as an unknown count.
         """
 
         def _count():
             return entity.count(clause or "", qb=client)
 
-        return await self._to_thread_with_retry(_count, op=f"{op}_count")
+        try:
+            return await self._to_thread_with_retry(_count, op=f"{op}_count")
+        except Exception:
+            logger.warning(
+                "%s_count failed; serving the rows with an unknown total", op,
+                exc_info=True,
+            )
+            return None
 
     async def _fetch_page(
         self,
@@ -526,29 +553,9 @@ class QBOService:
                 rows=rows, offset=offset, total=offset + len(rows), has_more=False
             )
 
-        try:
-            total = await self._count_matching(
-                entity, client=client, clause=clause, op=op
-            )
-        except Exception:
-            # The page is already in hand and QuickBooks answered it. A COUNT
-            # that faults leaves the SIZE unknown, not the page invalid, and
-            # "size unknown" is a state PagedResult already models — it is what
-            # a COUNT answered without a totalCount produces. Letting this
-            # propagate instead discards rows QBO successfully returned and
-            # turns a served page into a 500 through the router's catch-all.
-            #
-            # Logged rather than swallowed: `total is None` below makes
-            # has_more True, so the caller is told the set may continue, which
-            # is the safe reading. But a COUNT failing every time is a real
-            # fault and would otherwise be invisible — the response looks
-            # exactly like QBO declining to count.
-            logger.warning(
-                "COUNT failed for %s; serving the page with an unknown total",
-                op,
-                exc_info=True,
-            )
-            total = None
+        # `_count_matching` never raises: a COUNT that faults comes back as
+        # None, the same "size unknown" this already handles.
+        total = await self._count_matching(entity, client=client, clause=clause, op=op)
         if overshot:
             # has_more stays False even when the COUNT went unanswered. The
             # empty page is itself the proof that no row exists at or past this

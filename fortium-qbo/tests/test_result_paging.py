@@ -909,6 +909,35 @@ def test_a_failed_count_still_serves_the_page_it_already_has(monkeypatch, caplog
     )
 
 
+def test_a_failed_count_does_not_discard_a_completed_walk(monkeypatch, caplog):
+    """The same guarantee at the other _count_matching call site.
+
+    `_fetch_all_pages` reaches its COUNT only after exhausting the page
+    budget, so a fault there throws away up to twenty pages QuickBooks already
+    served — the outcome is the same as the single-page case but the cost is
+    twenty times larger. The guard lives in `_count_matching` rather than at
+    either call site so there is one implementation of it.
+    """
+    # The budget has to be exhausted to reach the COUNT at all — a walk that
+    # ends on a short page returns from there and never counts. An earlier
+    # draft of this test used a ledger the walk could finish, so it proved
+    # nothing about the COUNT path.
+    entity = _CountFaultingEntity(ledger_size=2500)
+    svc = _service(monkeypatch, "Invoice", entity)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.qbo_service"):
+        page = asyncio.run(
+            svc._fetch_all_pages(
+                entity, client=object(), clause=None, op="walk", max_pages=2
+            )
+        )
+
+    assert len(page.rows) == 2 * PAGE, "the walk's rows must survive a COUNT fault"
+    assert page.total is None
+    assert page.has_more is True
+    assert [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
 def test_recurring_transaction_has_no_id_to_order_by():
     """Why /api/recurring-transactions/ stays on the unpaged path.
 
