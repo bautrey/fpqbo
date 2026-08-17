@@ -64,8 +64,6 @@ async def list_payments(
             max_results=max_results,
             offset=offset,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -86,8 +84,6 @@ async def get_payment(
         if not payment:
             raise HTTPException(status_code=404, detail="Payment not found")
         return payment
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

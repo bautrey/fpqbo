@@ -70,8 +70,6 @@ async def list_bills(
             max_results=max_results,
             offset=offset,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -142,6 +140,8 @@ async def update_bill(
     logger.info(f"Updating bill {bill_id} for company_id={company_id}")
     try:
         return await qbo.update_bill(company_id, bill_id, sparse_payload)
+    except HTTPException:
+        raise
     except ValidationException as e:
         if getattr(e, "error_code", 0) == 5310:
             raise HTTPException(
@@ -170,8 +170,6 @@ async def delete_bill(
     """Delete a specific bill by ID."""
     try:
         return await qbo.delete_bill(company_id, bill_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -190,8 +188,6 @@ async def get_bill(
         if not bill:
             raise HTTPException(status_code=404, detail="Bill not found")
         return bill
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

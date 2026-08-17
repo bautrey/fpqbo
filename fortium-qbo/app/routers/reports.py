@@ -48,8 +48,6 @@ async def get_trial_balance(
             end_date=parsed_end,
             accounting_method=accounting_method,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -79,8 +77,6 @@ async def get_balance_sheet(
             as_of_date=parsed_date,
             accounting_method=accounting_method,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -112,8 +108,6 @@ async def get_profit_and_loss(
             end_date=parsed_end,
             accounting_method=accounting_method,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -150,8 +144,6 @@ async def get_general_ledger(
             account=account,
             accounting_method=accounting_method,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

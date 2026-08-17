@@ -28,8 +28,6 @@ async def list_items(
     """List all items."""
     try:
         return await qbo.get_items(company_id=company_id, active_only=active_only, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -75,8 +73,6 @@ async def get_item(
         if not result:
             raise HTTPException(status_code=404, detail="Item not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

@@ -28,8 +28,6 @@ async def get_company_info(
         if not result:
             raise HTTPException(status_code=404, detail="Company info not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -47,8 +45,6 @@ async def get_preferences(
         if not result:
             raise HTTPException(status_code=404, detail="Preferences not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

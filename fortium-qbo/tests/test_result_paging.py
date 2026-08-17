@@ -22,6 +22,8 @@ import asyncio
 import logging
 
 import pytest
+
+from app.exceptions import QboNotFound
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -794,7 +796,7 @@ def test_an_unknown_company_in_the_summary_is_still_a_404():
 
     class _Missing:
         async def get_all_invoices(self, **kwargs):
-            raise ValueError("QBO company not found: 99")
+            raise QboNotFound("QBO company not found: 99")
 
     app = FastAPI()
     app.include_router(invoices.router)

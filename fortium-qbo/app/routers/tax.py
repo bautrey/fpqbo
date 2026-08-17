@@ -28,8 +28,6 @@ async def list_tax_agencies(
     """List all tax agencies."""
     try:
         return await qbo.get_tax_agencies(company_id=company_id, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -48,8 +46,6 @@ async def get_tax_agency(
         if not result:
             raise HTTPException(status_code=404, detail="Tax agency not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -67,8 +63,6 @@ async def list_tax_codes(
     """List all tax codes."""
     try:
         return await qbo.get_tax_codes(company_id=company_id, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -87,8 +81,6 @@ async def get_tax_code(
         if not result:
             raise HTTPException(status_code=404, detail="Tax code not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -106,8 +98,6 @@ async def list_tax_rates(
     """List all tax rates."""
     try:
         return await qbo.get_tax_rates(company_id=company_id, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -126,8 +116,6 @@ async def get_tax_rate(
         if not result:
             raise HTTPException(status_code=404, detail="Tax rate not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

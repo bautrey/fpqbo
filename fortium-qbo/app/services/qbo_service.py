@@ -207,10 +207,28 @@ class QBOService:
         self._clients: dict[str, QuickBooks] = {}
 
     def _get_company(self, company_id: int) -> QboCompany:
-        """Get QBO company by ID."""
+        """Get QBO company by ID, refusing one whose authorization is gone.
+
+        The disconnected check lives here as well as in `get_company_by_code`
+        because this is the path the API actually takes: every `/api/*` route
+        takes `company_id: int` and arrives here, while `get_company_by_code`
+        has no callers outside tests. Without it, `QboCompanyDisconnected` is
+        a status nothing can produce — a disconnected company would instead
+        fall through to `_refresh_token`, fail there, and come back as a 503
+        that reads identically to "credentials not configured".
+
+        Those are different problems. 503 says this service is misconfigured;
+        409 says one company needs reconnecting at /admin/companies and the
+        other three are fine.
+        """
         company = self.db.query(QboCompany).filter(QboCompany.id == company_id).first()
         if not company:
             raise QboNotFound(f"QBO company not found: {company_id}")
+        if company.token_status == "disconnected":
+            raise QboCompanyDisconnected(
+                f"QBO company {company.code} is disconnected. "
+                "Please reconnect via /admin/companies."
+            )
         return company
 
     def _get_company_by_realm(self, realm_id: str) -> QboCompany:
@@ -261,6 +279,10 @@ class QBOService:
         )
         if not credentials:
             env_label = "sandbox" if company.is_sandbox else company.region
+            # Logged as well as raised: a missing environment variable is not a
+            # caller mistake, and a sync job that swallows the 503 would leave no
+            # server-side trace. The sibling refresh-failure site already logs.
+            logger.error("QBO credentials not configured for: %s", env_label)
             raise QboUnavailable(f"QBO credentials not configured for: {env_label}")
 
         client_id, client_secret = credentials
@@ -323,6 +345,10 @@ class QBOService:
             )
             if not credentials:
                 env_label = "sandbox" if company.is_sandbox else company.region
+                # Logged as well as raised: a missing environment variable is not a
+                # caller mistake, and a sync job that swallows the 503 would leave no
+                # server-side trace. The sibling refresh-failure site already logs.
+                logger.error("QBO credentials not configured for: %s", env_label)
                 raise QboUnavailable(f"QBO credentials not configured for: {env_label}")
 
             client_id, client_secret = credentials

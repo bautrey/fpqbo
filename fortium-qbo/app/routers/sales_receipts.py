@@ -50,8 +50,6 @@ async def list_sales_receipts(
             max_results=max_results,
             offset=offset,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -72,8 +70,6 @@ async def get_sales_receipt(
         if not result:
             raise HTTPException(status_code=404, detail="Sales receipt not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

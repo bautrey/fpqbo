@@ -96,16 +96,50 @@ def test_an_unknown_company_code_is_a_404():
     assert caught.value.status_code == 404
 
 
-def test_a_disconnected_company_is_not_reported_as_missing():
-    """It exists. Answering 404 tells a monitor the company was deleted."""
-    company = SimpleNamespace(code="FOR-138", token_status="disconnected")
+@pytest.mark.parametrize("lookup", ["by_code", "by_id"], ids=["by-code", "by-id"])
+def test_a_disconnected_company_is_not_reported_as_missing(lookup):
+    """It exists. Answering 404 tells a monitor the company was deleted.
+
+    Both lookups, because only one of them is reachable. Every `/api/*` route
+    takes `company_id: int` and goes through `_get_company`;
+    `get_company_by_code` has no callers outside tests. Asserting only the
+    by-code path would pass while no request could ever produce a 409 — the
+    unfalsifiable-guard mistake this work stream has already made twice.
+    """
+    company = SimpleNamespace(id=1, code="FOR-138", token_status="disconnected")
+    svc = _svc(company=company)
 
     with pytest.raises(QboCompanyDisconnected) as caught:
-        _svc(company=company).get_company_by_code("FOR-138")
+        if lookup == "by_code":
+            svc.get_company_by_code("FOR-138")
+        else:
+            svc._get_company(1)
 
     assert caught.value.status_code == 409
     assert caught.value.status_code != 404, "a live company must not read as absent"
+    assert caught.value.status_code != 503, (
+        "409 must stay distinguishable from 'credentials not configured'"
+    )
     assert "reconnect" in str(caught.value.detail).lower()
+
+
+def test_a_disconnected_company_reaches_the_caller_as_409_through_a_route():
+    """End to end on the path the API actually takes.
+
+    Before `_get_company` learned the check, a disconnected company fell
+    through to `_refresh_token`, failed there, and surfaced as a 503 that read
+    identically to a misconfigured service.
+    """
+
+    class _Disconnected:
+        async def get_vendors(self, **kwargs):
+            company = SimpleNamespace(id=1, code="FOR-138", token_status="disconnected")
+            return _svc(company=company)._get_company(1)
+
+    res = _client(_Disconnected()).get("/vendors/", params={"company_id": 1})
+
+    assert res.status_code == 409
+    assert "reconnect" in res.json()["detail"].lower()
 
 
 def test_missing_credentials_are_not_reported_as_a_missing_company(monkeypatch):
@@ -193,3 +227,113 @@ def test_a_real_bug_is_still_a_500_and_still_says_so():
 
     assert res.status_code == 500
     assert res.status_code != 404, "a local bug must not read as a missing record"
+
+
+def test_a_write_endpoint_reports_a_missing_company_the_same_way_a_read_does():
+    """The verb-dependent half of the same defect.
+
+    `run_qbo_write` mapped every ValueError to 400, so POST /api/vendors/ with
+    an unknown company answered 400 while GET answered 404 — one missing
+    record, two status codes, decided by the HTTP method. The typed exception
+    passes through the helper's HTTPException branch, so both now agree.
+    """
+    from app.routers._qbo_write import run_qbo_write
+
+    async def _raise():
+        raise QboNotFound("QBO company not found: 99")
+
+    with pytest.raises(QboNotFound) as caught:
+        _run(run_qbo_write(_raise(), entity="vendor"))
+
+    assert caught.value.status_code == 404
+    assert caught.value.status_code != 400, (
+        "a write must not report a missing company differently from a read"
+    )
+
+
+def test_a_write_endpoint_still_calls_a_bad_payload_a_400():
+    """Narrowing the write path must not stop payload errors being 4xx."""
+    from app.routers._qbo_write import run_qbo_write
+
+    async def _raise():
+        raise KeyError("value")
+
+    with pytest.raises(HTTPException) as caught:
+        _run(run_qbo_write(_raise(), entity="vendor"))
+
+    assert caught.value.status_code == 400
+
+
+def test_an_incidental_value_error_is_no_longer_a_missing_record():
+    """The reason the `except ValueError -> 404` clauses were removed.
+
+    Nothing raises ValueError as a not-found signal any more, so a clause
+    catching it could only relabel an accident. Reproduced before the removal:
+    a JSONDecodeError from QuickBooks returning an HTML error body answered
+    `404 "Expecting value: line 1 column 1 (char 0)"` — a parse failure
+    reported as a missing company.
+    """
+    res = _client(_Raises(ValueError("Expecting value: line 1 column 1 (char 0)"))).get(
+        "/vendors/", params={"company_id": 1}
+    )
+
+    assert res.status_code == 500
+    assert res.status_code != 404, "a parse failure must not read as a missing record"
+
+
+# ---------------------------------------------------------------------------
+# Structural: the guard has to be on every handler that can see these types
+# ---------------------------------------------------------------------------
+
+
+def test_every_catch_all_router_handler_lets_a_deliberate_status_through():
+    """Parsed, not grepped — a regex is what let this through the first time.
+
+    The guard was inserted across 26 files by a pattern requiring the raise to
+    sit immediately after `except Exception as e:`. `update_bill` has a
+    logger.error in between, so the insertion skipped it AND the scan meant to
+    verify the insertion skipped it too, being the same pattern. It shipped
+    returning 500 for every one of these types.
+
+    Walking the AST is the version that cannot share a blind spot with the
+    edit that produced it.
+    """
+    import ast
+    import pathlib
+
+    routers = pathlib.Path(__file__).resolve().parents[1] / "app" / "routers"
+    assert routers.is_dir(), routers
+
+    unguarded = []
+    for path in sorted(routers.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Try):
+                continue
+            names = [
+                "bare" if h.type is None
+                else h.type.id if isinstance(h.type, ast.Name)
+                else "tuple" if isinstance(h.type, ast.Tuple)
+                else ast.unparse(h.type)
+                for h in node.handlers
+            ]
+            if not any(n in ("Exception", "bare") for n in names):
+                continue
+            if "HTTPException" not in names:
+                unguarded.append(f"{path.name}:{node.lineno} {names}")
+
+    assert not unguarded, (
+        "these handlers rewrap a deliberate 404/409/503 as a 500:\n  "
+        + "\n  ".join(unguarded)
+    )
+
+
+def test_the_not_found_channel_has_no_producers_left_outside_the_types():
+    """`except ValueError -> 404` was removed everywhere, so nothing may
+    reintroduce a ValueError meaning "missing record" in the service."""
+    import pathlib
+
+    svc = pathlib.Path(__file__).resolve().parents[1] / "app" / "services" / "qbo_service.py"
+    assert "raise ValueError" not in svc.read_text(), (
+        "qbo_service raises ValueError again — either route it through the "
+        "typed exceptions or the 404 channel is ambiguous once more"
+    )

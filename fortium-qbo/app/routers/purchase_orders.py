@@ -50,8 +50,6 @@ async def list_purchase_orders(
             max_results=max_results,
             offset=offset,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -72,8 +70,6 @@ async def get_purchase_order(
         if not result:
             raise HTTPException(status_code=404, detail="Purchase order not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

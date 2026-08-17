@@ -26,8 +26,6 @@ async def list_attachments(
     """List all attachments."""
     try:
         return await qbo.get_attachables(company_id=company_id, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -46,8 +44,6 @@ async def get_attachment(
         if not result:
             raise HTTPException(status_code=404, detail="Attachment not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

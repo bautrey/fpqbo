@@ -28,8 +28,6 @@ async def list_company_currencies(
     """List all company currencies."""
     try:
         return await qbo.get_company_currencies(company_id=company_id, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -48,8 +46,6 @@ async def get_company_currency(
         if not result:
             raise HTTPException(status_code=404, detail="Company currency not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -67,8 +63,6 @@ async def list_exchange_rates(
     """List all exchange rates."""
     try:
         return await qbo.get_exchange_rates(company_id=company_id, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -87,8 +81,6 @@ async def list_payment_methods(
     """List all payment methods."""
     try:
         return await qbo.get_payment_methods(company_id=company_id, active_only=active_only, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -107,8 +99,6 @@ async def get_payment_method(
         if not result:
             raise HTTPException(status_code=404, detail="Payment method not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -127,8 +117,6 @@ async def list_terms(
     """List all terms."""
     try:
         return await qbo.get_terms(company_id=company_id, active_only=active_only, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -147,8 +135,6 @@ async def get_term(
         if not result:
             raise HTTPException(status_code=404, detail="Term not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -167,8 +153,6 @@ async def list_classes(
     """List all tracking classes."""
     try:
         return await qbo.get_classes(company_id=company_id, active_only=active_only, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -187,8 +171,6 @@ async def get_class(
         if not result:
             raise HTTPException(status_code=404, detail="Class not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -206,8 +188,6 @@ async def list_customer_types(
     """List all customer types."""
     try:
         return await qbo.get_customer_types(company_id=company_id, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -226,8 +206,6 @@ async def get_customer_type(
         if not result:
             raise HTTPException(status_code=404, detail="Customer type not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

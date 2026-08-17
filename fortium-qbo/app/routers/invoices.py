@@ -65,8 +65,6 @@ async def list_invoices(
             max_results=max_results,
             offset=offset,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -87,8 +85,6 @@ async def get_invoice_by_doc_number(
         if not invoice:
             raise HTTPException(status_code=404, detail=f"Invoice with DocNumber '{doc_number}' not found")
         return invoice
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -104,8 +100,6 @@ async def delete_invoice(
     """Delete a specific invoice by ID."""
     try:
         return await qbo.delete_invoice(company_id, invoice_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -124,8 +118,6 @@ async def get_invoice(
         if not invoice:
             raise HTTPException(status_code=404, detail="Invoice not found")
         return invoice
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -161,8 +153,6 @@ async def get_trailing_12m_summary(
             start_date=start_date,
             end_date=end_date,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

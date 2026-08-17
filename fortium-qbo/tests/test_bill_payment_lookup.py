@@ -348,7 +348,9 @@ def test_the_endpoint_returns_the_payment_for_an_old_bill():
 
 
 def test_a_missing_bill_is_a_404_not_an_empty_list():
-    client = _client(_StubService(ValueError("Bill not found: 99999999")))
+    # QboNotFound, not ValueError: the router no longer reads ValueError as
+    # a missing record — since #15 the status travels with the type.
+    client = _client(_StubService(QboNotFound("Bill not found: 99999999")))
 
     res = client.get("/bill-payments/by-bill/99999999", params={"company_id": 1})
 
@@ -359,9 +361,9 @@ def test_a_missing_bill_is_a_404_not_an_empty_list():
 def test_a_half_resolved_bill_is_not_served_as_a_200_or_a_404(monkeypatch):
     """Through the router, with the real service: no partial body, no 404.
 
-    404 would say bill 64848 does not exist, and it does — the router reads
-    ValueError as "Bill not found", so the refusal is raised outside that
-    hierarchy on purpose.
+    404 would say bill 64848 does not exist, and it does. Since #15 the
+    not-found channel is QboNotFound rather than any ValueError, and this
+    refusal is deliberately neither.
     """
     svc = _service(
         monkeypatch,
