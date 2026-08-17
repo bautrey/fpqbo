@@ -86,6 +86,12 @@ class QboUnavailable(HTTPException):
     failed. 503 because it is our side that is broken and the caller has no
     request they could have made instead — the honest reading is "unavailable,
     try later or escalate", not "no such thing".
+
+    A failed refresh sits here rather than under ``QboCompanyDisconnected``
+    because the failure is caught with a bare ``except Exception``: a network
+    timeout and a genuinely dead grant arrive identically, and answering 409
+    would page someone to re-authorise a company that is fine. Splitting them
+    needs the transient classifier at the raise site.
     """
 
     def __init__(self, detail: str) -> None:

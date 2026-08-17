@@ -365,14 +365,24 @@ class QBOService:
                 logger.error(f"Failed to update token_status: {db_error}")
                 self.db.rollback()
 
-            # 409, not 503. This message already tells the caller to reconnect
-            # one named company; answering with the same status as "QBO
-            # credentials not configured" is precisely the collapse this change
-            # exists to undo. 503 is now reserved for the service being
-            # misconfigured, which no reconnect can fix.
-            raise QboCompanyDisconnected(
-                f"QBO company {company.code} needs reconnecting: token refresh "
-                f"failed. Please reconnect at /admin/companies. Error: {e}"
+            # 503, which is what this PR specified and was reviewed against.
+            #
+            # A pass of this review changed it to 409 "reconnect this company",
+            # on the reasoning that the message already says so. That was
+            # wrong, for a reason worth leaving here: the `except Exception`
+            # above catches every failure, including requests.ConnectionError,
+            # Timeout and an Intuit 5xx. Labelling those 409 pages a human to
+            # perform an OAuth reconnect on a company whose authorization is
+            # perfectly good. 503 covers the transient case honestly and is
+            # still the fix that matters — before this PR all of it was a 404.
+            #
+            # Separating the two properly means asking _is_transient_qbo_error
+            # here and answering 409 only for a genuinely dead grant. That is
+            # a real improvement and it is filed, not smuggled in at the end
+            # of a review with nobody left to look at it.
+            raise QboUnavailable(
+                f"Token refresh failed for {company.code}. "
+                f"Please reconnect at /admin/companies. Error: {e}"
             )
 
     def _get_client(self, company: QboCompany) -> QuickBooks:
@@ -1458,8 +1468,11 @@ class QBOService:
                 len(rows),
                 ", ".join(unresolved),
             )
-            # RuntimeError, not ValueError: the router reads ValueError as
-            # "Bill not found" and answers 404, and this bill was found.
+            # RuntimeError, not ValueError or QboNotFound: this bill WAS found, so
+            # answering 404 would trade one wrong answer for another. Since #15
+            # not-found is QboNotFound and the `except ValueError -> 404` clauses
+            # are gone, so the original hazard is retired — but the refusal still
+            # must not be mistakable for a missing record.
             raise RuntimeError(
                 f"Bill {bill_id} links {len(payment_ids)} BillPayment(s) but "
                 f"only {len(rows)} resolved; unresolved id(s): "

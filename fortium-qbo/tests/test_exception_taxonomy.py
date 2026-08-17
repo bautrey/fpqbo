@@ -126,11 +126,13 @@ def test_a_disconnected_company_is_not_reported_as_missing(lookup):
 def test_the_reconnect_states_are_the_ones_we_meant():
     """Spelled out, not read from the constant under test.
 
-    The first version parametrized the test below over
-    RECONNECT_REQUIRED_STATUSES itself, so shrinking the constant back to
-    {"disconnected"} — reintroducing the exact bug this pass fixed — just ran
-    one fewer case and stayed green. A test that sources its expectation from
-    the thing it is testing cannot fail. Found by mutation, not by reading it.
+    An earlier version parametrized over RECONNECT_REQUIRED_STATUSES itself,
+    so changing the constant just changed which cases ran and stayed green —
+    a test that sources its expectation from the thing it tests cannot fail.
+    Found by mutation, not by reading it.
+
+    The set is deliberately one element. `expired` and `refresh_failed` are
+    excluded so a transient blip cannot strand a company; see the constant.
     """
     assert RECONNECT_REQUIRED_STATUSES == {"disconnected"}
 
@@ -174,15 +176,18 @@ def test_an_active_company_is_not_blocked():
     assert _svc(company=company)._get_company(1) is company
 
 
-def test_a_failed_refresh_says_reconnect_this_company_not_service_broken(monkeypatch):
-    """The status a real expiry actually produces, which nothing covered.
+def test_a_failed_refresh_is_503_and_above_all_is_not_a_404(monkeypatch):
+    """The status a real token expiry produces, which nothing covered before.
 
-    `_refresh_token` raising is the common way a company stops working — far
-    commoner than an admin clicking Disconnect. It used to raise
-    QboUnavailable, so it answered 503: the same number as "QBO credentials
-    not configured", which is a whole-service problem no reconnect can fix.
-    Its own message says "Please reconnect at /admin/companies", so the 503
-    contradicted the text it shipped with.
+    503, not 409. A review pass changed this to 409 "reconnect this company"
+    because the message says so, then a later pass established why that is
+    wrong: the `except Exception` catches ConnectionError, Timeout and Intuit
+    5xx alongside a genuinely dead grant, so 409 would page a human to
+    re-authorise a company whose authorization is fine.
+
+    Telling the two apart needs `_is_transient_qbo_error` at the raise site
+    and is filed separately. What matters here, and what this PR is for, is
+    that it is no longer a 404 claiming the company does not exist.
     """
     company = SimpleNamespace(
         id=1, code="FOR-138", region="US", is_sandbox=False,
@@ -209,12 +214,13 @@ def test_a_failed_refresh_says_reconnect_this_company_not_service_broken(monkeyp
         query=svc.db.query, commit=lambda: None, rollback=lambda: None
     )
 
-    with pytest.raises(QboCompanyDisconnected) as caught:
+    with pytest.raises(QboUnavailable) as caught:
         svc._refresh_token(company)
 
-    assert caught.value.status_code == 409
-    assert caught.value.status_code != 503, (
-        "a company needing reconnection must not read as a misconfigured service"
+    assert caught.value.status_code == 503
+    assert caught.value.status_code != 404, (
+        "the defect this PR exists to fix: a broken token reading as a "
+        "company that does not exist"
     )
     assert "reconnect" in str(caught.value.detail).lower()
 
