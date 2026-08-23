@@ -8,18 +8,25 @@ and the bill stayed falsely closed. The live case was BillPayment 659 in
 FOR-971, $2,496 to David Bergh: Wise cancelled on 08/07, a human noticed and
 voided it by hand on 08/12, and the books were wrong for five days in between.
 
-Two things here are easy to get backwards, so both are pinned:
+Three things here are easy to get wrong, so all three are pinned:
 
-1. The void must go BEFORE the note, not after. Both survive — the void's
-   payload is sparse, so a separately-written PrivateNote persists through it
-   (verified on 659, which still carries its note at SyncToken 2). But if the
-   note is written first and the void then fails, a live payment that is still
-   closing its bill now carries a note claiming it was voided. That is worse
-   than the state we started in.
+1. The void must fire exactly once. `_to_thread_with_retry` warns "READ paths
+   only — never wrap a non-idempotent mutation"; wrapping it there re-voids
+   after a transient fault and the re-void fails, so the caller is told 500
+   for books that were corrected.
 
-2. A note that fails to save must not fail the request. The void is what the
-   caller asked for; reporting failure after it succeeded would tell them the
-   books were not corrected when they were.
+2. An already-voided payment is a no-op, not an error. The caller is a
+   reconciler that re-runs over the same cancelled transfers, so every pass
+   after the first would otherwise 500 on correct books.
+
+3. A 610 on the re-read AFTER the void must not be reported as not-found.
+   That would tell a reconciler which never retries a 404 that a void which
+   actually happened never did.
+
+The PrivateNote stamp this endpoint originally carried was cut to #25. The
+SDK's save() is a FULL update for BillPayment — `sparse` defaults to False
+and `to_json()` ships Line, TotalAmt and VendorRef — so it replaces rather
+than amends, and cannot be verified without a live write.
 """
 
 import asyncio
@@ -140,82 +147,6 @@ def test_an_unknown_payment_is_a_404_not_a_silent_success(monkeypatch):
     assert "void" not in _FakeBillPayment.calls, "must not void what it could not fetch"
 
 
-def test_the_void_happens_before_the_note(monkeypatch):
-    """The whole point of the ordering.
-
-    Stamping first and then failing the void leaves a live payment carrying a
-    note that says it was voided — a wrong record that reads as authoritative.
-    """
-    svc = _svc(monkeypatch)
-
-    _run(svc.void_bill_payment(company_id=2, entity_id=659, note="Wise cancelled"))
-
-    calls = _FakeBillPayment.calls
-    assert "void" in calls and "save" in calls
-    assert calls.index("void") < calls.index("save"), (
-        f"note was written before the void: {calls}"
-    )
-
-
-def test_the_note_is_applied_and_reported(monkeypatch):
-    svc = _svc(monkeypatch)
-
-    result = _run(
-        svc.void_bill_payment(
-            company_id=2, entity_id=659,
-            note="Voided - Wise transfer 2275843074 Cancelled on 08/07/26",
-        )
-    )
-
-    assert result["note_applied"] is True
-    assert "2275843074" in result["PrivateNote"]
-
-
-def test_a_failed_note_does_not_fail_the_void(monkeypatch, caplog):
-    """The void already succeeded. Raising now would report the books
-    uncorrected when they were corrected."""
-    svc = _svc(monkeypatch)
-    _FakeBillPayment.save_raises = RuntimeError("QBO rejected the update")
-
-    with caplog.at_level(logging.ERROR, logger="app.services.qbo_service"):
-        result = _run(
-            svc.void_bill_payment(company_id=2, entity_id=659, note="Wise cancelled")
-        )
-
-    assert result["TotalAmt"] == 0.0, "the void must stand"
-    assert result["note_applied"] is False, (
-        "the caller has to be able to tell the provenance did not stick, or "
-        "they will believe QBO holds a record it does not"
-    )
-    assert [r for r in caplog.records if r.levelno == logging.ERROR], (
-        "a swallowed failure with no log is invisible"
-    )
-
-
-def test_a_failed_void_is_not_reported_as_success(monkeypatch):
-    """The one failure that must propagate."""
-    svc = _svc(monkeypatch)
-    _FakeBillPayment.void_raises = RuntimeError("QBO rejected the void")
-
-    with pytest.raises(RuntimeError):
-        _run(svc.void_bill_payment(company_id=2, entity_id=659, note="Wise cancelled"))
-
-    assert "save" not in _FakeBillPayment.calls, (
-        "a note must never be stamped onto a payment that is still live"
-    )
-
-
-def test_no_note_means_no_second_write(monkeypatch):
-    svc = _svc(monkeypatch)
-
-    result = _run(svc.void_bill_payment(company_id=2, entity_id=659))
-
-    assert "save" not in _FakeBillPayment.calls
-    assert "note_applied" not in result, (
-        "the flag should only appear when a note was actually requested"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
@@ -267,25 +198,6 @@ def test_a_404_from_the_service_reaches_the_caller_as_404():
     assert res.status_code == 404
     assert res.status_code != 400, "the helper clobbered a deliberate 404"
     assert res.json()["detail"] == "BillPayment 999999 not found"
-
-
-def test_the_note_reaches_the_service_from_the_query_string():
-    recorded = {}
-
-    class _Recording:
-        async def void_bill_payment(self, company_id, entity_id, note=None):
-            recorded.update(company_id=company_id, entity_id=entity_id, note=note)
-            return {"Id": str(entity_id), "TotalAmt": 0, "note_applied": True}
-
-    res = _client(_Recording()).post(
-        "/bill-payments/659/void",
-        params={"company_id": 2, "note": "Wise transfer 2275843074 cancelled"},
-    )
-
-    assert res.status_code == 200
-    assert recorded["note"] == "Wise transfer 2275843074 cancelled"
-    assert recorded["entity_id"] == 659
-    assert recorded["company_id"] == 2
 
 
 def test_an_unexpected_fault_is_a_500_and_leaves_a_traceback(caplog):
@@ -348,4 +260,47 @@ def test_the_void_is_not_retried_after_a_transient_fault(monkeypatch):
     assert _FakeBillPayment.calls.count("void") == 1, (
         f"void fired {_FakeBillPayment.calls.count('void')} times: "
         f"{_FakeBillPayment.calls}"
+    )
+
+
+def test_voiding_an_already_voided_payment_is_a_no_op(monkeypatch):
+    """The reconciler re-runs over the same set of cancelled transfers.
+
+    QBO rejects a re-void as a non-transient ValidationException, so without
+    this the second and every later pass answers 500 for books that are
+    already correct — and a 500 is what a reconciler retries forever.
+    """
+    svc = _svc(monkeypatch)
+    _FakeBillPayment._instance.TotalAmt = 0.0  # QBO's mark of a voided payment
+
+    result = _run(svc.void_bill_payment(company_id=2, entity_id=659))
+
+    assert result["already_voided"] is True
+    assert "void" not in _FakeBillPayment.calls, (
+        "re-voiding is what makes the reconciler's second pass fail"
+    )
+
+
+def test_a_610_after_the_void_is_not_reported_as_not_found(monkeypatch):
+    """The void already happened. Answering 404 tells a caller that never
+    retries a 404 that it never happened, and the books silently diverge."""
+    svc = _svc(monkeypatch)
+
+    seen = {"n": 0}
+    real_get = _FakeBillPayment.get.__func__
+
+    def _vanishing_get(cls, entity_id, qb=None):
+        seen["n"] += 1
+        if seen["n"] == 2:  # the re-read, after void() has fired
+            raise ObjectNotFoundException("gone", error_code=610)
+        return real_get(cls, entity_id, qb=qb)
+
+    monkeypatch.setattr(_FakeBillPayment, "get", classmethod(_vanishing_get))
+
+    with pytest.raises(Exception) as caught:
+        _run(svc.void_bill_payment(company_id=2, entity_id=659))
+
+    assert "void" in _FakeBillPayment.calls, "precondition: the void must have fired"
+    assert not isinstance(caught.value, QboNotFound), (
+        "a completed void was reported as a missing payment"
     )

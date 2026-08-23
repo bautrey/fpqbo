@@ -125,14 +125,6 @@ async def create_bill_payment(
 async def void_bill_payment(
     entity_id: int,
     company_id: int = Query(..., description="QBO company ID"),
-    note: str | None = Query(
-        None,
-        description=(
-            "Optional PrivateNote recording why, applied AFTER the void. "
-            "Best-effort: a note that fails to save will not fail the void. "
-            "Read `note_applied` in the response to know whether it stuck."
-        ),
-    ),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
     """Void a bill payment, e.g. when the underlying transfer was cancelled.
@@ -141,16 +133,19 @@ async def void_bill_payment(
     payment was closing. That is the point: a payment that never happened
     should not leave a bill looking settled.
 
+    Idempotent. A payment already voided comes back 200 with
+    `already_voided: true` rather than an error, because the caller is a
+    reconciler that re-runs over the same set.
+
     Wrapped in `run_qbo_write`, which the older void and delete endpoints are
-    not. Their carve-out exists because the helper maps `ValueError` to 400 and
-    not-found used to be a `ValueError`, so wrapping them would have turned a
-    404 into a 400. Since #15 not-found is `QboNotFound`, an `HTTPException`
-    that the helper re-raises untouched, so the hazard is gone — and the helper
-    logs its 500s with a traceback, which a hand-rolled `except Exception` here
-    would not. A new endpoint that fails silently is not worth the symmetry.
+    not. Their carve-out exists because the helper maps `ValueError` to 400
+    and not-found used to be a `ValueError`, so wrapping them would have
+    turned a 404 into a 400. Since #15 not-found is `QboNotFound`, an
+    `HTTPException` the helper re-raises untouched — and the helper logs its
+    500s with a traceback, which a hand-rolled clause here would not.
     """
     return await run_qbo_write(
-        qbo.void_bill_payment(company_id, entity_id, note=note),
+        qbo.void_bill_payment(company_id, entity_id),
         entity="bill payment void",
     )
 

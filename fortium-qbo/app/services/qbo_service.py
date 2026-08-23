@@ -1547,105 +1547,89 @@ class QBOService:
         return result.to_dict()
 
     async def void_bill_payment(
-        self, company_id: int, entity_id: int, note: str | None = None
+        self, company_id: int, entity_id: int
     ) -> dict[str, Any]:
-        """Void a BillPayment in QBO, optionally stamping why.
+        """Void a BillPayment in QBO.
 
-        Unlike `void_journal_entry`, this needs no hand-rolled request:
-        BillPayment carries the SDK's `VoidMixin`, which maps it to
-        `operation=update&include=void`. So `bp.void(qb=client)` is the whole
+        No hand-rolled request needed, unlike `void_journal_entry`: BillPayment
+        carries the SDK's `VoidMixin`, which maps it to
+        `operation=update&include=void`, so `bp.void(qb=client)` is the whole
         operation.
 
-        On `note`, and the order it happens in — both halves matter:
+        Voiding twice is a no-op rather than an error. QBO rejects a re-void
+        as a non-transient ValidationException, and the caller here is a
+        reconciler that re-runs over the same set of cancelled transfers — so
+        without this check every pass after the first would answer 500 for
+        books that are already correct. A zeroed `TotalAmt` is QBO's own mark
+        of a voided payment.
 
-        `VoidMixin.get_void_data()` builds the BillPayment payload as exactly
-        `{Id, SyncToken, sparse: True}`. Every other field is dropped before
-        the request is assembled, so a note can never travel with the void
-        itself. It has to be a second call.
-
-        Because that payload is sparse, a note written separately survives the
-        void — confirmed against a real record rather than inferred:
-        BillPayment 659 in FOR-971 was voided by hand on 2026-08-12 and still
-        reads `TotalAmt 0` with `PrivateNote "Voided - Wise transfer
-        2275843074 Cancelled on 08/07/26"` at SyncToken 2.
-
-        The void goes FIRST and the note second, which is the opposite of the
-        intuitive order. Both persist either way, but the failure modes are
-        not symmetric. Stamp first and the void fails, and a live payment that
-        is still closing its bill now carries a note saying it was voided —
-        worse than having done nothing. Void first and the note fails, and the
-        books are right with no provenance, which is recoverable.
-
-        The note is therefore best-effort: it is logged if it fails and never
-        turns a successful void into an error. Callers get `note_applied` so
-        they can carry the provenance themselves if it did not stick.
+        There is deliberately no PrivateNote parameter. See #25: the SDK's
+        `save()` is a FULL update for this object (`sparse` defaults to False
+        and `to_json()` ships `Line`, `TotalAmt` and `VendorRef`), so stamping
+        a note is a replace, not an amend — it would overwrite any memo the
+        payment already carried and cannot be verified without a live write.
 
         Args:
             company_id: QBO company ID
             entity_id: QBO BillPayment ID to void
-            note: optional PrivateNote recording why, applied after the void
 
         Returns:
-            The voided BillPayment as a dict, with `TotalAmt` zeroed by QBO.
-            Carries an extra `note_applied` bool when `note` was requested.
+            The BillPayment as a dict, with `TotalAmt` zeroed by QBO, plus
+            `already_voided` when it was found in that state.
         """
         company = self._get_company(company_id)
         client = self._get_client(company)
 
+        def _fetch():
+            return BillPayment.get(entity_id, qb=client)
+
+        # Only the fetch is inside the not-found mapping. A 610 raised by the
+        # re-read AFTER the void has fired would otherwise be reported as
+        # "BillPayment not found" — telling a reconciler that never retries a
+        # 404 that a void which actually happened never did.
+        try:
+            existing = await asyncio.to_thread(_fetch)
+        except ObjectNotFoundException as exc:
+            # ReadMixin.get() returns from_json(...) or raises; it never
+            # returns a falsy object, so a `if not bp` guard here would be
+            # dead code and the 610 would surface as a 500. Same mapping as
+            # get_bill_payments_by_bill_id.
+            raise QboNotFound(f"BillPayment {entity_id} not found") from exc
+
+        if self._is_voided(existing):
+            result = existing.to_dict()
+            result["already_voided"] = True
+            return result
+
         def _void():
-            bp = BillPayment.get(entity_id, qb=client)
-            bp.void(qb=client)
-            # Re-read rather than trusting the void's response body: QBO
-            # answers a sparse update with a sparse object, so the caller
-            # would get a near-empty payment back instead of the zeroed one.
+            existing.void(qb=client)
+            # Re-read rather than trusting the void's response: QBO answers a
+            # sparse update with a sparse object, so the caller would get a
+            # near-empty payment back instead of the zeroed one.
             return BillPayment.get(entity_id, qb=client)
 
         # asyncio.to_thread, NOT _to_thread_with_retry. That helper says
         # "READ paths only — never wrap a non-idempotent mutation (double-post
-        # risk)" and it means it: a transient fault raised AFTER QBO has
-        # applied the void re-runs this whole closure and voids a second time.
-        # The re-void fails as a non-transient ValidationException, so the
-        # caller is told 500 for books that were in fact corrected — which is
-        # exactly the failure the note ordering below exists to prevent.
-        # Every other mutation in this service uses plain to_thread.
+        # risk)" and it means it: a transient fault raised after QBO has
+        # applied the void re-runs the closure and voids a second time, and
+        # the re-void fails non-transiently, so the caller is told 500 for
+        # books that were corrected. Every other mutation here uses to_thread.
+        voided = await asyncio.to_thread(_void)
+        return voided.to_dict() if hasattr(voided, "to_dict") else voided
+
+    @staticmethod
+    def _is_voided(payment) -> bool:
+        """QBO marks a voided BillPayment by zeroing its TotalAmt.
+
+        Read defensively: `TotalAmt` arrives as a string on some payloads, and
+        a payment that genuinely totals zero is indistinguishable from a
+        voided one — which is acceptable here because voiding a zero-value
+        payment is a no-op either way.
+        """
         try:
-            voided = await asyncio.to_thread(_void)
-        except ObjectNotFoundException as exc:
-            # The SDK's ReadMixin.get() never returns a falsy object — it
-            # returns from_json(...) or raises 610. A `if not bp` guard here
-            # would be dead code and the 610 would reach run_qbo_write's
-            # catch-all as a 500, which inverts caller behaviour: a reconciler
-            # retries a 500 forever and a 404 never. Same mapping as
-            # get_bill_payments_by_bill_id.
-            raise QboNotFound(f"BillPayment {entity_id} not found") from exc
-        result = voided.to_dict() if hasattr(voided, "to_dict") else voided
-
-        if note is None:
-            return result
-
-        def _stamp():
-            bp = BillPayment.get(entity_id, qb=client)
-            bp.PrivateNote = note
-            bp.save(qb=client)
-            return BillPayment.get(entity_id, qb=client)
-
-        try:
-            stamped = await asyncio.to_thread(_stamp)
-        except Exception as e:
-            # Deliberately swallowed, and the only place in this method that
-            # is. The void has already succeeded and is the operation the
-            # caller asked for; failing the request now would tell them the
-            # books were not corrected when they were.
-            logger.error(
-                "Voided BillPayment %s but could not stamp its note: %s",
-                entity_id, e, exc_info=True,
-            )
-            result["note_applied"] = False
-            return result
-
-        result = stamped.to_dict() if hasattr(stamped, "to_dict") else result
-        result["note_applied"] = True
-        return result
+            return float(getattr(payment, "TotalAmt", None) or 0) == 0.0
+        except (TypeError, ValueError):
+            return False
 
     # -------------------------------------------------------------------------
     # CreditMemo
