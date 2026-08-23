@@ -4,9 +4,13 @@ Body-taking POST create/update endpoints must distinguish *client* errors (bad
 request → 4xx) from *server* errors (real QBO failures → 5xx), and must log the
 5xx path so genuine failures leave a breadcrumb.
 
-Scope note: not-found-semantic endpoints (POST void, DELETE) do NOT use this
-helper — they map a missing entity to 404, which this helper's uniform
-ValueError→400 would clobber. Those keep their own try/except.
+Scope note, now partly historical: the older not-found-semantic endpoints
+(POST void, DELETE) do NOT use this helper, because they map a missing entity
+to 404 and the uniform ValueError→400 below would have clobbered it. That
+hazard ended with #15 — not-found is `QboNotFound`, an `HTTPException` the
+guard re-raises untouched — so those endpoints could adopt this helper and
+would gain the 500 logging by doing so. They have not been converted; new
+ones (`POST /bill-payments/{id}/void`) use it.
 
 Since #15 the service signals its own conditions with typed exceptions —
 ``QboNotFound`` (404), ``QboCompanyDisconnected`` (409), ``QboUnavailable``

@@ -1546,6 +1546,92 @@ class QBOService:
         result = await asyncio.to_thread(_create)
         return result.to_dict()
 
+    async def void_bill_payment(
+        self, company_id: int, entity_id: int, note: str | None = None
+    ) -> dict[str, Any]:
+        """Void a BillPayment in QBO, optionally stamping why.
+
+        Unlike `void_journal_entry`, this needs no hand-rolled request:
+        BillPayment carries the SDK's `VoidMixin`, which maps it to
+        `operation=update&include=void`. So `bp.void(qb=client)` is the whole
+        operation.
+
+        On `note`, and the order it happens in — both halves matter:
+
+        `VoidMixin.get_void_data()` builds the BillPayment payload as exactly
+        `{Id, SyncToken, sparse: True}`. Every other field is dropped before
+        the request is assembled, so a note can never travel with the void
+        itself. It has to be a second call.
+
+        Because that payload is sparse, a note written separately survives the
+        void — confirmed against a real record rather than inferred:
+        BillPayment 659 in FOR-971 was voided by hand on 2026-08-12 and still
+        reads `TotalAmt 0` with `PrivateNote "Voided - Wise transfer
+        2275843074 Cancelled on 08/07/26"` at SyncToken 2.
+
+        The void goes FIRST and the note second, which is the opposite of the
+        intuitive order. Both persist either way, but the failure modes are
+        not symmetric. Stamp first and the void fails, and a live payment that
+        is still closing its bill now carries a note saying it was voided —
+        worse than having done nothing. Void first and the note fails, and the
+        books are right with no provenance, which is recoverable.
+
+        The note is therefore best-effort: it is logged if it fails and never
+        turns a successful void into an error. Callers get `note_applied` so
+        they can carry the provenance themselves if it did not stick.
+
+        Args:
+            company_id: QBO company ID
+            entity_id: QBO BillPayment ID to void
+            note: optional PrivateNote recording why, applied after the void
+
+        Returns:
+            The voided BillPayment as a dict, with `TotalAmt` zeroed by QBO.
+            Carries an extra `note_applied` bool when `note` was requested.
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _void():
+            bp = BillPayment.get(entity_id, qb=client)
+            if not bp:
+                raise QboNotFound(f"BillPayment {entity_id} not found")
+            bp.void(qb=client)
+            # Re-read rather than trusting the void's response body: QBO
+            # answers a sparse update with a sparse object, so the caller
+            # would get a near-empty payment back instead of the zeroed one.
+            return BillPayment.get(entity_id, qb=client)
+
+        voided = await self._to_thread_with_retry(_void, op="void_bill_payment")
+        result = voided.to_dict() if hasattr(voided, "to_dict") else voided
+
+        if note is None:
+            return result
+
+        def _stamp():
+            bp = BillPayment.get(entity_id, qb=client)
+            bp.PrivateNote = note
+            bp.save(qb=client)
+            return BillPayment.get(entity_id, qb=client)
+
+        try:
+            stamped = await asyncio.to_thread(_stamp)
+        except Exception as e:
+            # Deliberately swallowed, and the only place in this method that
+            # is. The void has already succeeded and is the operation the
+            # caller asked for; failing the request now would tell them the
+            # books were not corrected when they were.
+            logger.error(
+                "Voided BillPayment %s but could not stamp its note: %s",
+                entity_id, e, exc_info=True,
+            )
+            result["note_applied"] = False
+            return result
+
+        result = stamped.to_dict() if hasattr(stamped, "to_dict") else result
+        result["note_applied"] = True
+        return result
+
     # -------------------------------------------------------------------------
     # CreditMemo
     # -------------------------------------------------------------------------
