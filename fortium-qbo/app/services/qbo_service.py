@@ -1635,11 +1635,20 @@ class QBOService:
         each. The empty Line is what QBO clears on a void; the total is
         shared by both states.
 
-        Also guards an absent TotalAmt, which the SDK constructor defaults to
-        0 — that would otherwise read as voided on any payload missing it.
+        An absent or unreadable TotalAmt answers False, not True. `or 0`
+        would coerce it to zero and report the payment voided on the strength
+        of a field that was never there — and the direction matters, because
+        the two mistakes are not equally bad. Wrongly answering "already
+        voided" skips the void silently and leaves the bill closed; wrongly
+        attempting a void on something already voided gets a loud rejection
+        from QBO that someone will see. When the state cannot be established,
+        attempt it.
         """
+        total = getattr(payment, "TotalAmt", None)
+        if total is None:
+            return False
         try:
-            total = float(getattr(payment, "TotalAmt", None) or 0)
+            total = float(total)
         except (TypeError, ValueError):
             return False
         return total == 0.0 and not getattr(payment, "Line", None)

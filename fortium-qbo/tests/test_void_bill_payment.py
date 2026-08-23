@@ -339,17 +339,29 @@ def test_a_live_vendor_credit_payment_is_not_mistaken_for_voided(monkeypatch):
     assert result.get("already_voided") is not True
 
 
-def test_a_missing_total_is_not_read_as_voided(monkeypatch):
-    """The SDK constructor defaults TotalAmt to 0, so a payload that simply
-    omits it would otherwise look voided."""
+@pytest.mark.parametrize("line", [[], [{"Amount": 100}]], ids=["no-lines", "with-lines"])
+def test_an_unreadable_total_is_not_read_as_voided(monkeypatch, line):
+    """Both line states, because only one of them tests anything.
+
+    The first version of this passed a non-empty Line, so the `and not Line`
+    clause carried it and the missing-total branch was never exercised — the
+    test named for the guard did not reach the guard. With an empty Line the
+    old code answered "already voided" off a field that was never there.
+
+    False is the right answer when the state cannot be established: skipping
+    a void silently leaves a bill closed, while attempting one on an already
+    voided payment gets a loud rejection someone will notice.
+    """
     svc = _svc(monkeypatch)
     bp = _FakeBillPayment._instance
     bp.TotalAmt = None
-    bp.Line = [{"Amount": 100}]
+    bp.Line = line
 
     _run(svc.void_bill_payment(company_id=2, entity_id=42))
 
-    assert "void" in _FakeBillPayment.calls
+    assert "void" in _FakeBillPayment.calls, (
+        "an unreadable total must not be treated as proof of a void"
+    )
 
 
 def test_a_server_side_type_error_is_a_logged_500_not_a_payload_400(caplog):
