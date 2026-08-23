@@ -29,6 +29,11 @@ the HTTP method.
                               endpoint chose deliberately.
 - ``ValueError``            → 400 (str(e)) — now only payload problems, since
                               the service no longer raises ValueError at all.
+                              NOTE this is not conditioned on ``has_body``; a
+                              bodyless route that somehow raises ValueError
+                              still answers 400, unlogged. No current caller
+                              does, but the asymmetry with KeyError/TypeError
+                              is unintentional rather than reasoned.
 - ``KeyError`` / ``TypeError`` → 400 — a malformed payload (e.g. a Ref missing
                               its ``value`` key) surfacing while the service
                               builds the QBO object is a *client* error, not a
@@ -83,8 +88,10 @@ async def run_qbo_write(
         raise HTTPException(status_code=400, detail=str(e)) from e
     except (KeyError, TypeError) as e:
         if not has_body:
-            # No payload exists to be malformed, so this is ours. Fall through
-            # to the catch-all, which logs.
+            # No payload exists to be malformed, so this is ours: log it the
+            # way the catch-all would and answer 500. (Logged here rather than
+            # actually falling through, since `raise ... from e` inside an
+            # except clause does not re-enter the sibling handlers.)
             logger.error("QBO write failed for %s: %s", entity, e, exc_info=True)
             raise HTTPException(
                 status_code=500, detail=f"QBO API error: {e}"

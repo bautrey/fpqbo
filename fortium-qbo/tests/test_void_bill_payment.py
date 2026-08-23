@@ -55,7 +55,6 @@ class _FakeBillPayment:
     calls: list[str] = []
     existing = True
     void_raises: Exception | None = None
-    save_raises: Exception | None = None
 
     def __init__(self, entity_id="659"):
         self.Id = entity_id
@@ -72,7 +71,6 @@ class _FakeBillPayment:
         cls.calls = []
         cls.existing = True
         cls.void_raises = None
-        cls.save_raises = None
         cls._instance = _FakeBillPayment()
 
     @classmethod
@@ -96,12 +94,6 @@ class _FakeBillPayment:
         self.TotalAmt = 0.0
         self.SyncToken = str(int(self.SyncToken) + 1)
 
-    def save(self, qb=None):
-        type(self).calls.append("save")
-        if type(self).save_raises:
-            raise type(self).save_raises
-        self.SyncToken = str(int(self.SyncToken) + 1)
-        return self
 
     def to_dict(self):
         return {
@@ -343,10 +335,16 @@ def test_a_live_vendor_credit_payment_is_not_mistaken_for_voided(monkeypatch):
 def test_an_unreadable_total_is_not_read_as_voided(monkeypatch, line):
     """Both line states, because only one of them tests anything.
 
-    The first version of this passed a non-empty Line, so the `and not Line`
-    clause carried it and the missing-total branch was never exercised — the
-    test named for the guard did not reach the guard. With an empty Line the
-    old code answered "already voided" off a field that was never there.
+    The first version passed a non-empty Line, so the `and not Line` clause
+    carried it and the missing-total branch was never exercised — the test
+    named for the guard did not reach the guard. With an empty Line the old
+    code answered "already voided" off a field that was never there.
+
+    Scope, honestly: `BillPayment.from_json` always sets TotalAmt (0 when the
+    payload omits it), so this state does not arrive from the SDK. The guard
+    is defence for a hand-built object and this test covers it as such. What
+    keeps production correct is the empty-Line clause, covered above against
+    real shapes read out of FOR-971.
 
     False is the right answer when the state cannot be established: skipping
     a void silently leaves a bill closed, while attempting one on an already

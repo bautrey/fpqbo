@@ -1615,7 +1615,11 @@ class QBOService:
         # the re-void fails non-transiently, so the caller is told 500 for
         # books that were corrected. Every other mutation here uses to_thread.
         voided = await asyncio.to_thread(_void)
-        return voided.to_dict() if hasattr(voided, "to_dict") else voided
+        result = voided.to_dict()
+        # Present on both paths rather than only the short-circuit, so a
+        # caller reads one shape and never has to tell absent from false.
+        result["already_voided"] = False
+        return result
 
     @staticmethod
     def _is_voided(payment) -> bool:
@@ -1635,14 +1639,20 @@ class QBOService:
         each. The empty Line is what QBO clears on a void; the total is
         shared by both states.
 
-        An absent or unreadable TotalAmt answers False, not True. `or 0`
+        An absent or unreadable TotalAmt answers False, not True — `or 0`
         would coerce it to zero and report the payment voided on the strength
-        of a field that was never there — and the direction matters, because
-        the two mistakes are not equally bad. Wrongly answering "already
-        voided" skips the void silently and leaves the bill closed; wrongly
-        attempting a void on something already voided gets a loud rejection
-        from QBO that someone will see. When the state cannot be established,
-        attempt it.
+        of a field that was never there. Note what this does and does not
+        buy: `BillPayment.from_json` always sets TotalAmt (to 0 when the
+        payload omits it) and Line (to []), so against a real SDK object the
+        None branch never fires and the discriminator rests entirely on Line.
+        It is defence for a hand-built object, not the thing keeping
+        production correct — the empty Line is.
+
+        The direction is deliberate wherever it does apply. Wrongly answering
+        "already voided" skips the void silently and leaves the bill closed;
+        wrongly attempting a void on something already voided draws a loud
+        rejection from QBO that someone will see. When the state cannot be
+        established, attempt it.
         """
         total = getattr(payment, "TotalAmt", None)
         if total is None:
