@@ -1594,15 +1594,30 @@ class QBOService:
 
         def _void():
             bp = BillPayment.get(entity_id, qb=client)
-            if not bp:
-                raise QboNotFound(f"BillPayment {entity_id} not found")
             bp.void(qb=client)
             # Re-read rather than trusting the void's response body: QBO
             # answers a sparse update with a sparse object, so the caller
             # would get a near-empty payment back instead of the zeroed one.
             return BillPayment.get(entity_id, qb=client)
 
-        voided = await self._to_thread_with_retry(_void, op="void_bill_payment")
+        # asyncio.to_thread, NOT _to_thread_with_retry. That helper says
+        # "READ paths only — never wrap a non-idempotent mutation (double-post
+        # risk)" and it means it: a transient fault raised AFTER QBO has
+        # applied the void re-runs this whole closure and voids a second time.
+        # The re-void fails as a non-transient ValidationException, so the
+        # caller is told 500 for books that were in fact corrected — which is
+        # exactly the failure the note ordering below exists to prevent.
+        # Every other mutation in this service uses plain to_thread.
+        try:
+            voided = await asyncio.to_thread(_void)
+        except ObjectNotFoundException as exc:
+            # The SDK's ReadMixin.get() never returns a falsy object — it
+            # returns from_json(...) or raises 610. A `if not bp` guard here
+            # would be dead code and the 610 would reach run_qbo_write's
+            # catch-all as a 500, which inverts caller behaviour: a reconciler
+            # retries a 500 forever and a 404 never. Same mapping as
+            # get_bill_payments_by_bill_id.
+            raise QboNotFound(f"BillPayment {entity_id} not found") from exc
         result = voided.to_dict() if hasattr(voided, "to_dict") else voided
 
         if note is None:

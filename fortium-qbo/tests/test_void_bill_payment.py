@@ -31,6 +31,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.dependencies.api_auth import verify_api_key
+from quickbooks.exceptions import ObjectNotFoundException, SevereException
+
 from app.exceptions import QboNotFound
 from app.routers import bill_payments
 from app.services.qbo_service import QBOService
@@ -65,7 +67,16 @@ class _FakeBillPayment:
     @classmethod
     def get(cls, entity_id, qb=None):
         cls.calls.append("get")
-        return cls._instance if cls.existing else None
+        if not cls.existing:
+            # What the real SDK does. ReadMixin.get() returns from_json(...)
+            # or raises — it never returns a falsy object. The first version
+            # of this fake returned None, so it validated a `if not bp` guard
+            # that is dead against the real client and the endpoint answered
+            # 500 where it documented 404.
+            raise ObjectNotFoundException(
+                "QB Object Not Found Exception", error_code=610
+            )
+        return cls._instance
 
     def void(self, qb=None):
         type(self).calls.append("void")
@@ -297,3 +308,44 @@ def test_an_unexpected_fault_is_a_500_and_leaves_a_traceback(caplog):
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert errors, "a 500 with no server-side trace is invisible"
     assert any(r.exc_info for r in errors), "the traceback is the useful part"
+
+
+def test_the_void_is_not_retried_after_a_transient_fault(monkeypatch):
+    """A void must fire exactly once, whatever QBO does afterwards.
+
+    `_to_thread_with_retry` carries the warning "READ paths only — never wrap
+    a non-idempotent mutation (double-post risk)". The first draft of this
+    method used it anyway. A transient fault raised after QBO had already
+    applied the void re-ran the whole closure and voided a second time; the
+    re-void fails as a non-transient ValidationException, so the caller is
+    told 500 for books that were in fact corrected — the same class of lie the
+    note ordering exists to prevent, arriving by a different route.
+    """
+    svc = _svc(monkeypatch)
+
+    calls = {"n": 0}
+    real_get = _FakeBillPayment.get.__func__
+
+    def _flaky_get(cls, entity_id, qb=None):
+        calls["n"] += 1
+        # Fault on the re-read, i.e. after the void has already been applied.
+        #
+        # SevereException, not a bare Exception with transient-sounding text.
+        # `_is_transient_qbo_error` dispatches on TYPE, so the first version of
+        # this test raised something the classifier declined to retry — no
+        # retry happened, the void fired once, and the test passed whether or
+        # not the mutation was wrapped in the retry helper. It proved nothing
+        # about the thing it was named for.
+        if calls["n"] == 2:
+            raise SevereException("QB Severe Exception", error_code=10000)
+        return real_get(cls, entity_id, qb=qb)
+
+    monkeypatch.setattr(_FakeBillPayment, "get", classmethod(_flaky_get))
+
+    with pytest.raises(Exception):
+        _run(svc.void_bill_payment(company_id=2, entity_id=659))
+
+    assert _FakeBillPayment.calls.count("void") == 1, (
+        f"void fired {_FakeBillPayment.calls.count('void')} times: "
+        f"{_FakeBillPayment.calls}"
+    )
