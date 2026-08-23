@@ -1619,17 +1619,30 @@ class QBOService:
 
     @staticmethod
     def _is_voided(payment) -> bool:
-        """QBO marks a voided BillPayment by zeroing its TotalAmt.
+        """A voided BillPayment has a zero TotalAmt AND no lines.
 
-        Read defensively: `TotalAmt` arrives as a string on some payloads, and
-        a payment that genuinely totals zero is indistinguishable from a
-        voided one — which is acceptable here because voiding a zero-value
-        payment is a no-op either way.
+        The zero alone is not enough, and assuming it was would have
+        reintroduced the defect this endpoint exists to fix. A BillPayment
+        that applies a VendorCredit legitimately totals zero while being
+        entirely live — this service creates them, and CLAUDE.md describes
+        the route as "also applies VendorCredit via LinkedTxn". Treating
+        those as already-voided means answering 200, never calling void(),
+        and leaving the bill falsely closed.
+
+        Measured against production on 2026-08-23, company FOR-971: voided
+        BillPayment 659 reads TotalAmt 0 with `Line: []`, while five live
+        payments (35, 133, 147 among them) read TotalAmt 0 with two lines
+        each. The empty Line is what QBO clears on a void; the total is
+        shared by both states.
+
+        Also guards an absent TotalAmt, which the SDK constructor defaults to
+        0 — that would otherwise read as voided on any payload missing it.
         """
         try:
-            return float(getattr(payment, "TotalAmt", None) or 0) == 0.0
+            total = float(getattr(payment, "TotalAmt", None) or 0)
         except (TypeError, ValueError):
             return False
+        return total == 0.0 and not getattr(payment, "Line", None)
 
     # -------------------------------------------------------------------------
     # CreditMemo

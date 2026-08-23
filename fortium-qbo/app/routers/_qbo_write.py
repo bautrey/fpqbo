@@ -47,13 +47,23 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 
-async def run_qbo_write(coro: Awaitable[Any], *, entity: str) -> Any:
+async def run_qbo_write(
+    coro: Awaitable[Any], *, entity: str, has_body: bool = True
+) -> Any:
     """Await a QBO write coroutine, mapping exceptions to HTTP status codes.
 
     Args:
         coro: the awaitable QBO write call (e.g. ``qbo.create_customer(...)``).
         entity: a human label for the entity being written (e.g. ``"customer"``),
             used in the malformed-payload message.
+        has_body: whether the endpoint accepts a request body. Pass ``False``
+            for a write driven only by path and query params (e.g. a void).
+            The ``KeyError``/``TypeError`` -> 400 branch exists to blame a
+            malformed payload; with no payload to blame, those can only be a
+            server-side bug and must reach the logged 500 instead. Answering
+            400 there tells a caller its request was wrong when the request
+            was fine, and — since that branch does not log — leaves no trace
+            of the actual fault.
 
     Returns:
         The coroutine's result unchanged on success.
@@ -72,6 +82,13 @@ async def run_qbo_write(coro: Awaitable[Any], *, entity: str) -> Any:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except (KeyError, TypeError) as e:
+        if not has_body:
+            # No payload exists to be malformed, so this is ours. Fall through
+            # to the catch-all, which logs.
+            logger.error("QBO write failed for %s: %s", entity, e, exc_info=True)
+            raise HTTPException(
+                status_code=500, detail=f"QBO API error: {e}"
+            ) from e
         raise HTTPException(
             status_code=400,
             detail=f"Invalid or missing field in {entity} payload: {e}",

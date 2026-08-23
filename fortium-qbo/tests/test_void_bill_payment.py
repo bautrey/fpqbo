@@ -61,6 +61,10 @@ class _FakeBillPayment:
         self.Id = entity_id
         self.SyncToken = "1"
         self.TotalAmt = 2496.0
+        # A real BillPayment carries lines. The emptiness of Line is what
+        # distinguishes a voided payment from a live zero-total one, so the
+        # fake has to model it or the discriminator is untested.
+        self.Line = [{"Amount": 2496.0}]
         self.PrivateNote = None
 
     @classmethod
@@ -271,7 +275,11 @@ def test_voiding_an_already_voided_payment_is_a_no_op(monkeypatch):
     already correct — and a 500 is what a reconciler retries forever.
     """
     svc = _svc(monkeypatch)
-    _FakeBillPayment._instance.TotalAmt = 0.0  # QBO's mark of a voided payment
+    # QBO's actual mark of a void: zero total AND an emptied Line. Setting the
+    # total alone is what BP 659 looked like to an earlier version of this
+    # test, and it is not sufficient — five live payments in FOR-971 share it.
+    _FakeBillPayment._instance.TotalAmt = 0.0
+    _FakeBillPayment._instance.Line = []
 
     result = _run(svc.void_bill_payment(company_id=2, entity_id=659))
 
@@ -304,3 +312,70 @@ def test_a_610_after_the_void_is_not_reported_as_not_found(monkeypatch):
     assert not isinstance(caught.value, QboNotFound), (
         "a completed void was reported as a missing payment"
     )
+
+
+def test_a_live_vendor_credit_payment_is_not_mistaken_for_voided(monkeypatch):
+    """The zero total alone is not the void marker, and assuming it was would
+    reintroduce the defect this endpoint exists to fix.
+
+    A BillPayment applying a VendorCredit legitimately totals zero while being
+    entirely live — this service creates them, and CLAUDE.md describes the
+    route as "also applies VendorCredit via LinkedTxn". Measured against
+    FOR-971 on 2026-08-23: voided BP 659 reads TotalAmt 0 with `Line: []`,
+    while five live payments (35, 133, 147 among them) read TotalAmt 0 with
+    two lines each. Reporting those already-voided leaves five bills falsely
+    closed and answers 200 while doing nothing.
+    """
+    svc = _svc(monkeypatch)
+    bp = _FakeBillPayment._instance
+    bp.TotalAmt = 0.0
+    bp.Line = [{"Amount": 0, "LinkedTxn": [{"TxnId": "123", "TxnType": "VendorCredit"}]}]
+
+    result = _run(svc.void_bill_payment(company_id=2, entity_id=35))
+
+    assert "void" in _FakeBillPayment.calls, (
+        "a live vendor-credit payment must actually be voided"
+    )
+    assert result.get("already_voided") is not True
+
+
+def test_a_missing_total_is_not_read_as_voided(monkeypatch):
+    """The SDK constructor defaults TotalAmt to 0, so a payload that simply
+    omits it would otherwise look voided."""
+    svc = _svc(monkeypatch)
+    bp = _FakeBillPayment._instance
+    bp.TotalAmt = None
+    bp.Line = [{"Amount": 100}]
+
+    _run(svc.void_bill_payment(company_id=2, entity_id=42))
+
+    assert "void" in _FakeBillPayment.calls
+
+
+def test_a_server_side_type_error_is_a_logged_500_not_a_payload_400(caplog):
+    """This endpoint takes no body, so there is no payload to blame.
+
+    `run_qbo_write`'s KeyError/TypeError -> 400 branch exists for malformed
+    request bodies and does not log. On a bodyless route it converts a real
+    bug — in _get_client, credential lookup, SDK from_json — into a terminal
+    client error the reconciler will drop the transfer over, with no trace of
+    the actual fault. The PR's other 500 test used AttributeError and missed
+    this branch entirely.
+    """
+
+    class _Broken:
+        async def void_bill_payment(self, *a, **k):
+            raise TypeError("'NoneType' object is not subscriptable")
+
+    with caplog.at_level(logging.ERROR, logger="app.routers._qbo_write"):
+        res = _client(_Broken()).post(
+            "/bill-payments/659/void", params={"company_id": 2}
+        )
+
+    assert res.status_code == 500, "a server bug must not be blamed on the caller"
+    assert res.status_code != 400
+    assert "payload" not in res.json()["detail"], (
+        "this endpoint has no payload to be invalid"
+    )
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors and any(r.exc_info for r in errors), "the 400 branch does not log"

@@ -147,6 +147,10 @@ async def void_bill_payment(
     return await run_qbo_write(
         qbo.void_bill_payment(company_id, entity_id),
         entity="bill payment void",
+        # No request body, so a KeyError/TypeError here cannot be the
+        # caller's malformed payload — it is a bug in ours, and must be a
+        # logged 500 rather than an unlogged 400 the caller cannot act on.
+        has_body=False,
     )
 
 
