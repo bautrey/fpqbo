@@ -64,6 +64,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.qbo_company import QboCompany
+from app.exceptions import QboCompanyDisconnected, QboNotFound, QboUnavailable
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
 from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
 
@@ -133,6 +134,27 @@ def _txn_date_clause(
     if end_date:
         clauses.append(date_bound("TxnDate", "<=", end_date))
     return " AND ".join(clauses) if clauses else None
+
+
+# token_status values meaning "do not even try this company" — a human has
+# deliberately taken it out of service. Only `disconnected`, which the admin
+# Disconnect button writes.
+#
+# `expired` and `refresh_failed` are deliberately NOT here, and the reason is
+# worth keeping because the obvious change is wrong. Both are written by a bare
+# `except Exception` around a refresh — qbo_oauth.py's manual-refresh handler
+# and _refresh_token respectively — so a single transient Intuit blip sets
+# them. Nothing automatic clears either one: the scheduler only refreshes
+# `active`, and refresh_all_now only `active` and `refresh_failed`. Gating here
+# on `expired` therefore converts one bad network moment into a permanent 409
+# for that company, destroying the self-heal it used to have — a request would
+# reach _get_client, find the token stale, refresh it, and set `active` again.
+#
+# Leaving them out costs nothing in signal. A company whose token really is
+# dead still attempts the refresh, that refresh still fails, and the raise site
+# answers QboCompanyDisconnected (409) with the reason. The status arrives from
+# where the evidence is, rather than from a flag that may be stale.
+RECONNECT_REQUIRED_STATUSES = frozenset({"disconnected"})
 
 
 def _active_clause(active_only: bool) -> str | None:
@@ -206,10 +228,39 @@ class QBOService:
         self._clients: dict[str, QuickBooks] = {}
 
     def _get_company(self, company_id: int) -> QboCompany:
-        """Get QBO company by ID."""
+        """Get QBO company by ID, refusing one whose authorization is gone.
+
+        The disconnected check lives here as well as in `get_company_by_code`
+        because this is the path the API actually takes: every `/api/*` route
+        takes `company_id: int` and arrives here, while `get_company_by_code`
+        has no callers outside tests. Without it, `QboCompanyDisconnected` is
+        a status nothing can produce — a disconnected company would instead
+        fall through to `_refresh_token`, fail there, and come back as a 503
+        that reads identically to "credentials not configured".
+
+        Those are different problems. 503 says this service is misconfigured;
+        409 says one company needs reconnecting at /admin/companies and the
+        other three are fine.
+        """
         company = self.db.query(QboCompany).filter(QboCompany.id == company_id).first()
         if not company:
-            raise ValueError(f"QBO company not found: {company_id}")
+            raise QboNotFound(f"QBO company not found: {company_id}")
+        if company.token_status in RECONNECT_REQUIRED_STATUSES:
+            # Logged for the same reason the QboUnavailable sites are: a sync
+            # job that swallows the status leaves no trace that a company
+            # stopped working.
+            # WARNING, not ERROR: this is a steady state already reported to
+            # the caller as a 409, and a sync job polling a disconnected
+            # company would emit ~1440 ERROR lines a day and bury real faults.
+            logger.warning(
+                "QBO company %s is disconnected (token_status=%s)",
+                company.code, company.token_status,
+            )
+            raise QboCompanyDisconnected(
+                f"QBO company {company.code} needs reconnecting "
+                f"(token_status={company.token_status}). "
+                "Please reconnect via /admin/companies."
+            )
         return company
 
     def _get_company_by_realm(self, realm_id: str) -> QboCompany:
@@ -218,7 +269,7 @@ class QBOService:
             self.db.query(QboCompany).filter(QboCompany.realm_id == realm_id).first()
         )
         if not company:
-            raise ValueError(f"QBO company not found for realm: {realm_id}")
+            raise QboNotFound(f"QBO company not found for realm: {realm_id}")
         return company
 
     def get_company_by_code(self, code: str) -> QboCompany:
@@ -232,14 +283,21 @@ class QBOService:
             QboCompany instance
 
         Raises:
-            ValueError: If company not found or disconnected
+            QboNotFound: no company with that code (404)
+            QboCompanyDisconnected: it exists, authorization revoked (409)
         """
         company = self.db.query(QboCompany).filter(QboCompany.code == code).first()
         if not company:
-            raise ValueError(f"QBO company not found: {code}")
-        if company.token_status == "disconnected":
-            raise ValueError(
-                f"QBO company {code} is disconnected. Please reconnect via /admin/companies."
+            raise QboNotFound(f"QBO company not found: {code}")
+        if company.token_status in RECONNECT_REQUIRED_STATUSES:
+            logger.warning(
+                "QBO company %s is disconnected (token_status=%s)",
+                code, company.token_status,
+            )
+            raise QboCompanyDisconnected(
+                f"QBO company {code} needs reconnecting "
+                f"(token_status={company.token_status}). "
+                "Please reconnect via /admin/companies."
             )
         return company
 
@@ -260,7 +318,11 @@ class QBOService:
         )
         if not credentials:
             env_label = "sandbox" if company.is_sandbox else company.region
-            raise ValueError(f"QBO credentials not configured for: {env_label}")
+            # Logged as well as raised: a missing environment variable is not a
+            # caller mistake, and a sync job that swallows the 503 would leave no
+            # server-side trace. The sibling refresh-failure site already logs.
+            logger.error("QBO credentials not configured for: %s", env_label)
+            raise QboUnavailable(f"QBO credentials not configured for: {env_label}")
 
         client_id, client_secret = credentials
         environment = "sandbox" if company.is_sandbox else "production"
@@ -303,7 +365,22 @@ class QBOService:
                 logger.error(f"Failed to update token_status: {db_error}")
                 self.db.rollback()
 
-            raise ValueError(
+            # 503, which is what this PR specified and was reviewed against.
+            #
+            # A pass of this review changed it to 409 "reconnect this company",
+            # on the reasoning that the message already says so. That was
+            # wrong, for a reason worth leaving here: the `except Exception`
+            # above catches every failure, including requests.ConnectionError,
+            # Timeout and an Intuit 5xx. Labelling those 409 pages a human to
+            # perform an OAuth reconnect on a company whose authorization is
+            # perfectly good. 503 covers the transient case honestly and is
+            # still the fix that matters — before this PR all of it was a 404.
+            #
+            # Separating the two properly means asking _is_transient_qbo_error
+            # here and answering 409 only for a genuinely dead grant. That is
+            # a real improvement and it is filed, not smuggled in at the end
+            # of a review with nobody left to look at it.
+            raise QboUnavailable(
                 f"Token refresh failed for {company.code}. "
                 f"Please reconnect at /admin/companies. Error: {e}"
             )
@@ -322,7 +399,11 @@ class QBOService:
             )
             if not credentials:
                 env_label = "sandbox" if company.is_sandbox else company.region
-                raise ValueError(f"QBO credentials not configured for: {env_label}")
+                # Logged as well as raised: a missing environment variable is not a
+                # caller mistake, and a sync job that swallows the 503 would leave no
+                # server-side trace. The sibling refresh-failure site already logs.
+                logger.error("QBO credentials not configured for: %s", env_label)
+                raise QboUnavailable(f"QBO credentials not configured for: {env_label}")
 
             client_id, client_secret = credentials
             # Sandbox companies use the "sandbox" environment (Development keys);
@@ -1097,7 +1178,7 @@ class QBOService:
         def _delete():
             bill = Bill.get(bill_id, qb=client)
             if not bill:
-                raise ValueError(f"Bill {bill_id} not found")
+                raise QboNotFound(f"Bill {bill_id} not found")
             return bill.delete(qb=client)
 
         result = await asyncio.to_thread(_delete)
@@ -1121,7 +1202,7 @@ class QBOService:
         def _delete():
             invoice = Invoice.get(invoice_id, qb=client)
             if not invoice:
-                raise ValueError(f"Invoice {invoice_id} not found")
+                raise QboNotFound(f"Invoice {invoice_id} not found")
             return invoice.delete(qb=client)
 
         result = await asyncio.to_thread(_delete)
@@ -1338,7 +1419,7 @@ class QBOService:
         except ObjectNotFoundException as exc:
             # 404, not 500: the caller named a bill that does not exist. Also
             # not `[]` — that would read as "this bill has no payments".
-            raise ValueError(f"Bill not found: {bill_id}") from exc
+            raise QboNotFound(f"Bill not found: {bill_id}") from exc
 
         payment_ids: list[str] = []
         for txn in bill.LinkedTxn:
@@ -1387,8 +1468,11 @@ class QBOService:
                 len(rows),
                 ", ".join(unresolved),
             )
-            # RuntimeError, not ValueError: the router reads ValueError as
-            # "Bill not found" and answers 404, and this bill was found.
+            # RuntimeError, not ValueError or QboNotFound: this bill WAS found, so
+            # answering 404 would trade one wrong answer for another. Since #15
+            # not-found is QboNotFound and the `except ValueError -> 404` clauses
+            # are gone, so the original hazard is retired — but the refusal still
+            # must not be mistakable for a missing record.
             raise RuntimeError(
                 f"Bill {bill_id} links {len(payment_ids)} BillPayment(s) but "
                 f"only {len(rows)} resolved; unresolved id(s): "
@@ -1710,7 +1794,7 @@ class QBOService:
         def _void():
             je = JournalEntry.get(entity_id, qb=client)
             if not je:
-                raise ValueError(f"JournalEntry {entity_id} not found")
+                raise QboNotFound(f"JournalEntry {entity_id} not found")
 
             url = "{0}/company/{1}/journalentry".format(client.api_url, client.company_id)
             payload = {

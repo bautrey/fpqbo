@@ -56,8 +56,8 @@ async def list_accounts(
             max_results=max_results,
             offset=offset,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
     apply_paging_headers(response, page)
@@ -100,8 +100,6 @@ async def get_account_by_number(
                 status_code=404, detail=f"Account {account_number} not found"
             )
         return account
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -120,8 +118,6 @@ async def get_account(
         if not account:
             raise HTTPException(status_code=404, detail="Account not found")
         return account
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

@@ -51,8 +51,8 @@ async def list_journal_entries(
             max_results=max_results,
             offset=offset,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
     apply_paging_headers(response, page)
@@ -112,8 +112,8 @@ async def void_journal_entry(
     """Void a specific journal entry by ID."""
     try:
         return await qbo.void_journal_entry(company_id, entity_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -130,8 +130,6 @@ async def get_journal_entry(
         if not result:
             raise HTTPException(status_code=404, detail="Journal entry not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

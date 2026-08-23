@@ -35,8 +35,8 @@ async def list_customers(
             active_only=active_only,
             max_results=max_results,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -88,8 +88,6 @@ async def get_customer(
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
         return customer
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

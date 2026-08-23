@@ -51,8 +51,8 @@ async def list_vendor_credits(
             max_results=max_results,
             offset=offset,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
     apply_paging_headers(response, page)
@@ -104,8 +104,6 @@ async def get_vendor_credit(
         if not result:
             raise HTTPException(status_code=404, detail="Vendor credit not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

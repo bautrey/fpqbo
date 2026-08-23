@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
+from app.exceptions import QboNotFound
+
 from app.services import qbo_service as qbo_service_module
 from app.services.qbo_service import QBOService
 
@@ -311,8 +313,11 @@ def test_void_journal_entry_not_found(monkeypatch):
         raising=True,
     )
 
-    with pytest.raises(ValueError, match="JournalEntry 555 not found"):
+    # QboNotFound rather than ValueError since #15 — the status travels with
+    # the exception now instead of being inferred by the handler.
+    with pytest.raises(QboNotFound, match="JournalEntry 555 not found") as caught:
         _run(svc.void_journal_entry(1, 555))
+    assert caught.value.status_code == 404
 
 
 # ---------------------------------------------------------------------------

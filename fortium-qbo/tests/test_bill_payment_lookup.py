@@ -32,6 +32,8 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+
+from app.exceptions import QboNotFound
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from quickbooks.exceptions import ObjectNotFoundException
@@ -218,8 +220,11 @@ def test_a_bill_that_does_not_exist_is_not_a_bill_without_payments(monkeypatch):
     payments = _FakeBillPayment(LEDGER)
     svc = _service(monkeypatch, _FakeBill(BILLS), payments)
 
-    with pytest.raises(ValueError, match="Bill not found: 99999999"):
+    # QboNotFound rather than ValueError since #15: the type now carries the
+    # 404 instead of the router inferring one from "any ValueError is a miss".
+    with pytest.raises(QboNotFound, match="Bill not found: 99999999") as caught:
         asyncio.run(svc.get_bill_payments_by_bill_id(company_id=1, bill_id=99999999))
+    assert caught.value.status_code == 404
 
     assert payments.where_calls == []
 
@@ -343,7 +348,9 @@ def test_the_endpoint_returns_the_payment_for_an_old_bill():
 
 
 def test_a_missing_bill_is_a_404_not_an_empty_list():
-    client = _client(_StubService(ValueError("Bill not found: 99999999")))
+    # QboNotFound, not ValueError: the router no longer reads ValueError as
+    # a missing record — since #15 the status travels with the type.
+    client = _client(_StubService(QboNotFound("Bill not found: 99999999")))
 
     res = client.get("/bill-payments/by-bill/99999999", params={"company_id": 1})
 
@@ -354,9 +361,9 @@ def test_a_missing_bill_is_a_404_not_an_empty_list():
 def test_a_half_resolved_bill_is_not_served_as_a_200_or_a_404(monkeypatch):
     """Through the router, with the real service: no partial body, no 404.
 
-    404 would say bill 64848 does not exist, and it does — the router reads
-    ValueError as "Bill not found", so the refusal is raised outside that
-    hierarchy on purpose.
+    404 would say bill 64848 does not exist, and it does. Since #15 the
+    not-found channel is QboNotFound rather than any ValueError, and this
+    refusal is deliberately neither.
     """
     svc = _service(
         monkeypatch,

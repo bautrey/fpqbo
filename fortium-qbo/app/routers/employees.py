@@ -27,8 +27,8 @@ async def list_employees(
     """List all employees."""
     try:
         return await qbo.get_employees(company_id=company_id, active_only=active_only, max_results=max_results)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
 
@@ -45,8 +45,6 @@ async def get_employee(
         if not result:
             raise HTTPException(status_code=404, detail="Employee not found")
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
