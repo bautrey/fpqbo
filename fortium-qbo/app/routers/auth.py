@@ -12,6 +12,7 @@ from app.database import SessionLocal
 from app.models import AdminUser
 from app.services.oauth_service import get_oauth_client
 from app.services.session_service import create_session
+from app.utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ async def callback(request: Request):
                 )
 
             # Update last_login_at
-            admin_user.last_login_at = datetime.utcnow()
+            admin_user.last_login_at = utcnow()
             db.commit()
             logger.info(f"Updated last_login_at for {email}")
 

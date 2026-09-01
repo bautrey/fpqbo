@@ -67,6 +67,7 @@ from app.models.qbo_company import QboCompany
 from app.exceptions import QboCompanyDisconnected, QboNotFound, QboUnavailable
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
 from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
+from app.utils.clock import as_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +306,10 @@ class QBOService:
         """Check if token needs refresh."""
         if not company.token_expires_at:
             return True
-        return datetime.utcnow() + TOKEN_REFRESH_BUFFER >= company.token_expires_at
+        # as_utc on the DB side: correct whether the column has been
+        # migrated to timestamptz yet or not, so the code and the ALTER can
+        # land in either order without a window where naive meets aware.
+        return utcnow() + TOKEN_REFRESH_BUFFER >= as_utc(company.token_expires_at)
 
     def _refresh_token(self, company: QboCompany) -> None:
         """Refresh OAuth token and persist to database.
@@ -344,9 +348,9 @@ class QBOService:
             # If this fails, the old refresh token is already invalid
             company.access_token = auth_client.access_token
             company.refresh_token = auth_client.refresh_token
-            company.token_expires_at = datetime.utcnow() + timedelta(hours=1)
-            company.refresh_token_expires_at = datetime.utcnow() + timedelta(days=100)
-            company.last_refreshed_at = datetime.utcnow()
+            company.token_expires_at = utcnow() + timedelta(hours=1)
+            company.refresh_token_expires_at = utcnow() + timedelta(days=100)
+            company.last_refreshed_at = utcnow()
             company.token_status = "active"
 
             self.db.commit()

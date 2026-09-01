@@ -18,6 +18,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models.qbo_company import QboCompany
 from app.services.qbo_service import QBOService
+from app.utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ class TokenRefreshScheduler:
         db = SessionLocal()
         try:
             # Find companies with tokens expiring within threshold
-            threshold = datetime.utcnow() + REFRESH_THRESHOLD
+            threshold = utcnow() + REFRESH_THRESHOLD
             companies = db.query(QboCompany).filter(
                 QboCompany.token_status == "active",
                 QboCompany.token_expires_at <= threshold,

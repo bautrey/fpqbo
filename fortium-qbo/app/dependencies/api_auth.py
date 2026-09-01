@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import AdminUser, ApiKey, RequestLog
 from app.services.session_service import verify_session
+from app.utils.clock import utcnow
 
 
 def hash_api_key(key: str) -> str:
@@ -65,7 +66,7 @@ async def verify_api_key(
         )
 
     # Update last_used_at
-    api_key.last_used_at = datetime.utcnow()
+    api_key.last_used_at = utcnow()
     db.commit()
 
     # Log the request (status will be updated by middleware or manually)

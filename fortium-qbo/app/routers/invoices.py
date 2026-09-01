@@ -17,6 +17,7 @@ from app.utils.paging import (
     apply_paging_headers,
 )
 from app.utils.query_dates import parse_date_param
+from app.utils.clock import utcnow
 
 router = APIRouter(
     prefix="/invoices",
@@ -137,7 +138,7 @@ async def get_trailing_12m_summary(
     that is a wrong dollar figure served as a clean 200. `complete` states
     whether the walk reached the end of the result set.
     """
-    end_date = datetime.utcnow()
+    end_date = utcnow()
     start_date = datetime(end_date.year - 1, end_date.month, 1)
 
     # Only the fetch is caught, and it stays that way. Historically the
@@ -182,5 +183,5 @@ async def get_trailing_12m_summary(
         # a partial aggregate is never read as the whole year.
         "complete": not page.has_more,
         "invoices_in_window": page.total,
-        "fetched_at": datetime.utcnow().isoformat(),
+        "fetched_at": utcnow().isoformat(),
     }

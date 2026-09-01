@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import RequireAdmin, generate_api_key
 from app.models import ApiKey, QboCompany
+from app.utils.clock import utcnow
 
 router = APIRouter(prefix="/admin/api-keys", tags=["api-keys"])
 
@@ -77,7 +78,7 @@ async def create_api_key(
         name=request.name,
         company_id=request.company_id,
         is_active=True,
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
     )
     db.add(api_key)
     db.commit()

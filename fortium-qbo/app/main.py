@@ -15,6 +15,7 @@ from app.routers import (
     purchases, qbo_oauth, recurring, reference, refund_receipts, reports,
     sales_receipts, tax, time_activities, transfers, vendor_credits, vendors,
 )
+from app.utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ async def lifespan(app: FastAPI):
                 admin_user = AdminUser(
                     email=settings.initial_admin_email,
                     is_super_admin=True,
-                    created_at=datetime.utcnow(),
+                    created_at=utcnow(),
                 )
                 db.add(admin_user)
                 db.commit()
