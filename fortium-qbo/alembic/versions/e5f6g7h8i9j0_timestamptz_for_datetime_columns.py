@@ -35,6 +35,11 @@ depends_on: Union[str, Sequence[str], None] = None
 # (table, column) for every timestamp column in the schema. Verified against
 # information_schema on the live database rather than read off the models, so
 # a column the models had drifted away from would still be caught.
+#
+# These are hardcoded and must stay hardcoded. The statements below build DDL
+# by interpolation, which is safe only because nothing here comes from a
+# caller or from the database. Anything that makes this list dynamic needs
+# psycopg2.sql.Identifier rather than this pattern.
 COLUMNS: list[tuple[str, str]] = [
     ("admin_users", "created_at"),
     ("admin_users", "last_login_at"),
@@ -51,16 +56,16 @@ COLUMNS: list[tuple[str, str]] = [
 def upgrade() -> None:
     for table, column in COLUMNS:
         op.execute(
-            f"ALTER TABLE {table} "
-            f"ALTER COLUMN {column} TYPE timestamptz "
-            f"USING {column} AT TIME ZONE 'UTC'"
+            f'ALTER TABLE "{table}" '
+            f'ALTER COLUMN "{column}" TYPE timestamptz '
+            f'USING "{column}" AT TIME ZONE \'UTC\''
         )
 
 
 def downgrade() -> None:
     for table, column in COLUMNS:
         op.execute(
-            f"ALTER TABLE {table} "
-            f"ALTER COLUMN {column} TYPE timestamp "
-            f"USING {column} AT TIME ZONE 'UTC'"
+            f'ALTER TABLE "{table}" '
+            f'ALTER COLUMN "{column}" TYPE timestamp '
+            f'USING "{column}" AT TIME ZONE \'UTC\''
         )

@@ -45,7 +45,6 @@ async def lifespan(app: FastAPI):
 
     # Seed initial admin user
     if settings.initial_admin_email:
-        from datetime import datetime
         from sqlalchemy import select
         from app.database import SessionLocal
         from app.models import AdminUser
