@@ -1,6 +1,6 @@
 """Invoice endpoints using QBO SDK."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -17,6 +17,7 @@ from app.utils.paging import (
     apply_paging_headers,
 )
 from app.utils.query_dates import parse_date_param
+from app.utils.clock import utcnow
 
 router = APIRouter(
     prefix="/invoices",
@@ -137,8 +138,13 @@ async def get_trailing_12m_summary(
     that is a wrong dollar figure served as a clean 200. `complete` states
     whether the walk reached the end of the result set.
     """
-    end_date = datetime.utcnow()
-    start_date = datetime(end_date.year - 1, end_date.month, 1)
+    end_date = utcnow()
+    # Aware, like end_date. Both are echoed back as isoformat in the response,
+    # so a naive start beside an aware end gives the caller two different
+    # timestamp shapes for the two ends of one window.
+    start_date = datetime(
+        end_date.year - 1, end_date.month, 1, tzinfo=timezone.utc
+    )
 
     # Only the fetch is caught, and it stays that way. Historically the
     # `except ValueError` here was the unknown-company signal answered with a
@@ -182,5 +188,5 @@ async def get_trailing_12m_summary(
         # a partial aggregate is never read as the whole year.
         "complete": not page.has_more,
         "invoices_in_window": page.total,
-        "fetched_at": datetime.utcnow().isoformat(),
+        "fetched_at": utcnow().isoformat(),
     }

@@ -1,6 +1,7 @@
 """Token status utility functions."""
 
 from datetime import datetime, timedelta
+from app.utils.clock import as_utc, utcnow
 from typing import NamedTuple
 
 
@@ -42,7 +43,8 @@ def get_token_status(
             expires_display="Not connected",
         )
 
-    now = datetime.utcnow()
+    now = utcnow()
+    token_expires_at = as_utc(token_expires_at)
 
     # Check if expired
     if token_expires_at <= now:
@@ -99,7 +101,8 @@ def get_refresh_token_status(
             refresh_css_class="bg-secondary",
         )
 
-    now = datetime.utcnow()
+    now = utcnow()
+    refresh_token_expires_at = as_utc(refresh_token_expires_at)
 
     # Check if expired
     if refresh_token_expires_at <= now:

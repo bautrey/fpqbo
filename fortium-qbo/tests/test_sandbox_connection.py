@@ -6,8 +6,10 @@ the sandbox API base URL), while production companies are unaffected. The Intuit
 ``AuthClient`` is stubbed everywhere so no network/discovery call is made.
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from types import SimpleNamespace
+
+from app.utils.clock import utcnow
 
 from sqlalchemy import create_engine, inspect, text
 
@@ -166,7 +168,7 @@ def test_get_client_uses_sandbox_environment(monkeypatch):
 
     company = SimpleNamespace(
         id=1,
-        token_expires_at=datetime.utcnow() + timedelta(hours=2),  # fresh: no refresh
+        token_expires_at=utcnow() + timedelta(hours=2),  # fresh: no refresh
         region="US",
         is_sandbox=True,
         access_token="access",
@@ -204,7 +206,7 @@ def test_get_client_uses_production_environment(monkeypatch):
 
     company = SimpleNamespace(
         id=2,
-        token_expires_at=datetime.utcnow() + timedelta(hours=2),
+        token_expires_at=utcnow() + timedelta(hours=2),
         region="US",
         is_sandbox=False,
         access_token="access",

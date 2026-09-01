@@ -9,7 +9,7 @@ to maintain a 15-minute buffer.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models.qbo_company import QboCompany
 from app.services.qbo_service import QBOService
+from app.utils.clock import as_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +75,33 @@ class TokenRefreshScheduler:
         """Refresh all tokens that are expiring soon."""
         db = SessionLocal()
         try:
-            # Find companies with tokens expiring within threshold
-            threshold = datetime.utcnow() + REFRESH_THRESHOLD
-            companies = db.query(QboCompany).filter(
+            # The expiry comparison happens in Python, not in SQL.
+            #
+            # This is the one comparison in the service that Postgres resolves
+            # rather than Python, and the two behave differently on a
+            # mismatch: Python raises TypeError on naive-vs-aware, Postgres
+            # silently coerces using the session TimeZone and returns a
+            # different set of rows. `init_db()` only calls create_all and
+            # never applies Alembic, so this query can run against either
+            # `timestamp` or `timestamptz` depending on whether the migration
+            # has been applied to that database — and picking the wrong
+            # companies here means a token quietly lapses.
+            #
+            # as_utc gives one comparison that is correct for both column
+            # types and independent of any server setting. The candidate set
+            # is the connected companies, which is a handful.
+            threshold = utcnow() + REFRESH_THRESHOLD
+            candidates = db.query(QboCompany).filter(
                 QboCompany.token_status == "active",
-                QboCompany.token_expires_at <= threshold,
                 QboCompany.refresh_token.isnot(None),
             ).all()
+            # NULL expiry stays excluded, matching what the SQL `<=` did.
+            companies = [
+                c
+                for c in candidates
+                if c.token_expires_at is not None
+                and as_utc(c.token_expires_at) <= threshold
+            ]
 
             if not companies:
                 logger.debug("No tokens need refresh")

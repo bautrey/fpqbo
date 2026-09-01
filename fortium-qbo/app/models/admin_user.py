@@ -3,10 +3,11 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Index, String
+from sqlalchemy import Boolean, DateTime, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+from app.utils.clock import utcnow
 
 
 class AdminUser(Base):
@@ -31,10 +32,10 @@ class AdminUser(Base):
     is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(
-        nullable=False, default=datetime.utcnow
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), 
+        nullable=False, default=utcnow
     )
-    last_login_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self) -> str:
         return f"<AdminUser(id={self.id}, email={self.email})>"

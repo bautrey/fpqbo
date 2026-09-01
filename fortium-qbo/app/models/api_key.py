@@ -3,10 +3,11 @@
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, ForeignKey, Index, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.utils.clock import utcnow
 
 if TYPE_CHECKING:
     from app.models.qbo_company import QboCompany
@@ -42,10 +43,10 @@ class ApiKey(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(
-        nullable=False, default=datetime.utcnow
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), 
+        nullable=False, default=utcnow
     )
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     company: Mapped["QboCompany"] = relationship(
