@@ -4,9 +4,13 @@ Body-taking POST create/update endpoints must distinguish *client* errors (bad
 request → 4xx) from *server* errors (real QBO failures → 5xx), and must log the
 5xx path so genuine failures leave a breadcrumb.
 
-Scope note: not-found-semantic endpoints (POST void, DELETE) do NOT use this
-helper — they map a missing entity to 404, which this helper's uniform
-ValueError→400 would clobber. Those keep their own try/except.
+Scope note, now partly historical: the older not-found-semantic endpoints
+(POST void, DELETE) do NOT use this helper, because they map a missing entity
+to 404 and the uniform ValueError→400 below would have clobbered it. That
+hazard ended with #15 — not-found is `QboNotFound`, an `HTTPException` the
+guard re-raises untouched — so those endpoints could adopt this helper and
+would gain the 500 logging by doing so. They have not been converted; new
+ones (`POST /bill-payments/{id}/void`) use it.
 
 Since #15 the service signals its own conditions with typed exceptions —
 ``QboNotFound`` (404), ``QboCompanyDisconnected`` (409), ``QboUnavailable``
@@ -25,6 +29,11 @@ the HTTP method.
                               endpoint chose deliberately.
 - ``ValueError``            → 400 (str(e)) — now only payload problems, since
                               the service no longer raises ValueError at all.
+                              NOTE this is not conditioned on ``has_body``; a
+                              bodyless route that somehow raises ValueError
+                              still answers 400, unlogged. No current caller
+                              does, but the asymmetry with KeyError/TypeError
+                              is unintentional rather than reasoned.
 - ``KeyError`` / ``TypeError`` → 400 — a malformed payload (e.g. a Ref missing
                               its ``value`` key) surfacing while the service
                               builds the QBO object is a *client* error, not a
@@ -43,13 +52,23 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 
-async def run_qbo_write(coro: Awaitable[Any], *, entity: str) -> Any:
+async def run_qbo_write(
+    coro: Awaitable[Any], *, entity: str, has_body: bool = True
+) -> Any:
     """Await a QBO write coroutine, mapping exceptions to HTTP status codes.
 
     Args:
         coro: the awaitable QBO write call (e.g. ``qbo.create_customer(...)``).
         entity: a human label for the entity being written (e.g. ``"customer"``),
             used in the malformed-payload message.
+        has_body: whether the endpoint accepts a request body. Pass ``False``
+            for a write driven only by path and query params (e.g. a void).
+            The ``KeyError``/``TypeError`` -> 400 branch exists to blame a
+            malformed payload; with no payload to blame, those can only be a
+            server-side bug and must reach the logged 500 instead. Answering
+            400 there tells a caller its request was wrong when the request
+            was fine, and — since that branch does not log — leaves no trace
+            of the actual fault.
 
     Returns:
         The coroutine's result unchanged on success.
@@ -68,6 +87,15 @@ async def run_qbo_write(coro: Awaitable[Any], *, entity: str) -> Any:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except (KeyError, TypeError) as e:
+        if not has_body:
+            # No payload exists to be malformed, so this is ours: log it the
+            # way the catch-all would and answer 500. (Logged here rather than
+            # actually falling through, since `raise ... from e` inside an
+            # except clause does not re-enter the sibling handlers.)
+            logger.error("QBO write failed for %s: %s", entity, e, exc_info=True)
+            raise HTTPException(
+                status_code=500, detail=f"QBO API error: {e}"
+            ) from e
         raise HTTPException(
             status_code=400,
             detail=f"Invalid or missing field in {entity} payload: {e}",

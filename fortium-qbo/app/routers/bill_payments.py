@@ -121,6 +121,39 @@ async def create_bill_payment(
     )
 
 
+@router.post("/{entity_id}/void", response_model=dict[str, Any])
+async def void_bill_payment(
+    entity_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Void a bill payment, e.g. when the underlying transfer was cancelled.
+
+    QBO keeps the record and zeroes `TotalAmt`, which reopens the bill the
+    payment was closing. That is the point: a payment that never happened
+    should not leave a bill looking settled.
+
+    Idempotent. A payment already voided comes back 200 with
+    `already_voided: true` rather than an error, because the caller is a
+    reconciler that re-runs over the same set.
+
+    Wrapped in `run_qbo_write`, which the older void and delete endpoints are
+    not. Their carve-out exists because the helper maps `ValueError` to 400
+    and not-found used to be a `ValueError`, so wrapping them would have
+    turned a 404 into a 400. Since #15 not-found is `QboNotFound`, an
+    `HTTPException` the helper re-raises untouched — and the helper logs its
+    500s with a traceback, which a hand-rolled clause here would not.
+    """
+    return await run_qbo_write(
+        qbo.void_bill_payment(company_id, entity_id),
+        entity="bill payment void",
+        # No request body, so a KeyError/TypeError here cannot be the
+        # caller's malformed payload — it is a bug in ours, and must be a
+        # logged 500 rather than an unlogged 400 the caller cannot act on.
+        has_body=False,
+    )
+
+
 @router.get("/{entity_id}", response_model=dict[str, Any])
 async def get_bill_payment(
     entity_id: int,

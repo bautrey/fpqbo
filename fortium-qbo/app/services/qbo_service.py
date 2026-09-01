@@ -1546,6 +1546,123 @@ class QBOService:
         result = await asyncio.to_thread(_create)
         return result.to_dict()
 
+    async def void_bill_payment(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any]:
+        """Void a BillPayment in QBO.
+
+        No hand-rolled request needed, unlike `void_journal_entry`: BillPayment
+        carries the SDK's `VoidMixin`, which maps it to
+        `operation=update&include=void`, so `bp.void(qb=client)` is the whole
+        operation.
+
+        Voiding twice is a no-op rather than an error. QBO rejects a re-void
+        as a non-transient ValidationException, and the caller here is a
+        reconciler that re-runs over the same set of cancelled transfers — so
+        without this check every pass after the first would answer 500 for
+        books that are already correct. A zeroed `TotalAmt` is QBO's own mark
+        of a voided payment.
+
+        There is deliberately no PrivateNote parameter. See #25: the SDK's
+        `save()` is a FULL update for this object (`sparse` defaults to False
+        and `to_json()` ships `Line`, `TotalAmt` and `VendorRef`), so stamping
+        a note is a replace, not an amend — it would overwrite any memo the
+        payment already carried and cannot be verified without a live write.
+
+        Args:
+            company_id: QBO company ID
+            entity_id: QBO BillPayment ID to void
+
+        Returns:
+            The BillPayment as a dict, with `TotalAmt` zeroed by QBO, plus
+            `already_voided` when it was found in that state.
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return BillPayment.get(entity_id, qb=client)
+
+        # Only the fetch is inside the not-found mapping. A 610 raised by the
+        # re-read AFTER the void has fired would otherwise be reported as
+        # "BillPayment not found" — telling a reconciler that never retries a
+        # 404 that a void which actually happened never did.
+        try:
+            existing = await asyncio.to_thread(_fetch)
+        except ObjectNotFoundException as exc:
+            # ReadMixin.get() returns from_json(...) or raises; it never
+            # returns a falsy object, so a `if not bp` guard here would be
+            # dead code and the 610 would surface as a 500. Same mapping as
+            # get_bill_payments_by_bill_id.
+            raise QboNotFound(f"BillPayment {entity_id} not found") from exc
+
+        if self._is_voided(existing):
+            result = existing.to_dict()
+            result["already_voided"] = True
+            return result
+
+        def _void():
+            existing.void(qb=client)
+            # Re-read rather than trusting the void's response: QBO answers a
+            # sparse update with a sparse object, so the caller would get a
+            # near-empty payment back instead of the zeroed one.
+            return BillPayment.get(entity_id, qb=client)
+
+        # asyncio.to_thread, NOT _to_thread_with_retry. That helper says
+        # "READ paths only — never wrap a non-idempotent mutation (double-post
+        # risk)" and it means it: a transient fault raised after QBO has
+        # applied the void re-runs the closure and voids a second time, and
+        # the re-void fails non-transiently, so the caller is told 500 for
+        # books that were corrected. Every other mutation here uses to_thread.
+        voided = await asyncio.to_thread(_void)
+        result = voided.to_dict()
+        # Present on both paths rather than only the short-circuit, so a
+        # caller reads one shape and never has to tell absent from false.
+        result["already_voided"] = False
+        return result
+
+    @staticmethod
+    def _is_voided(payment) -> bool:
+        """A voided BillPayment has a zero TotalAmt AND no lines.
+
+        The zero alone is not enough, and assuming it was would have
+        reintroduced the defect this endpoint exists to fix. A BillPayment
+        that applies a VendorCredit legitimately totals zero while being
+        entirely live — this service creates them, and CLAUDE.md describes
+        the route as "also applies VendorCredit via LinkedTxn". Treating
+        those as already-voided means answering 200, never calling void(),
+        and leaving the bill falsely closed.
+
+        Measured against production on 2026-08-23, company FOR-971: voided
+        BillPayment 659 reads TotalAmt 0 with `Line: []`, while five live
+        payments (35, 133, 147 among them) read TotalAmt 0 with two lines
+        each. The empty Line is what QBO clears on a void; the total is
+        shared by both states.
+
+        An absent or unreadable TotalAmt answers False, not True — `or 0`
+        would coerce it to zero and report the payment voided on the strength
+        of a field that was never there. Note what this does and does not
+        buy: `BillPayment.from_json` always sets TotalAmt (to 0 when the
+        payload omits it) and Line (to []), so against a real SDK object the
+        None branch never fires and the discriminator rests entirely on Line.
+        It is defence for a hand-built object, not the thing keeping
+        production correct — the empty Line is.
+
+        The direction is deliberate wherever it does apply. Wrongly answering
+        "already voided" skips the void silently and leaves the bill closed;
+        wrongly attempting a void on something already voided draws a loud
+        rejection from QBO that someone will see. When the state cannot be
+        established, attempt it.
+        """
+        total = getattr(payment, "TotalAmt", None)
+        if total is None:
+            return False
+        try:
+            total = float(total)
+        except (TypeError, ValueError):
+            return False
+        return total == 0.0 and not getattr(payment, "Line", None)
+
     # -------------------------------------------------------------------------
     # CreditMemo
     # -------------------------------------------------------------------------

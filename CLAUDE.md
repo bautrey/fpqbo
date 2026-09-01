@@ -103,6 +103,7 @@ All `/api/*` endpoints require `X-API-Key` header.
 | POST | `/api/bills/` | Create a bill |
 | POST | `/api/bills/{bill_id}` | Update a bill (sparse update) |
 | POST | `/api/bill-payments/` | Create a bill payment (also applies VendorCredit via `LinkedTxn`) |
+| POST | `/api/bill-payments/{id}/void` | Void a bill payment (idempotent; returns `already_voided` if it was) |
 | POST | `/api/vendor-credits/` | Create a vendor credit |
 | POST | `/api/journal-entries/` | Create a journal entry |
 | POST | `/api/journal-entries/{id}/void` | Void a journal entry |
