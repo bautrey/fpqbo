@@ -2,7 +2,6 @@
 
 import hashlib
 import secrets
-from datetime import datetime
 from typing import Annotated
 
 from fastapi import Cookie, Depends, Header, HTTPException, Query, Request

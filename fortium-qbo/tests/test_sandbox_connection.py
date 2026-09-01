@@ -6,7 +6,7 @@ the sandbox API base URL), while production companies are unaffected. The Intuit
 ``AuthClient`` is stubbed everywhere so no network/discovery call is made.
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from types import SimpleNamespace
 
 from app.utils.clock import utcnow

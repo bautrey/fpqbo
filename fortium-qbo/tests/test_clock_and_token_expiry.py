@@ -179,3 +179,86 @@ def test_token_status_reports_a_healthy_token_as_valid(aware):
     result = get_token_status(future if aware else future.replace(tzinfo=None), "active")
 
     assert result.status != "expired"
+
+
+# ---------------------------------------------------------------------------
+# The refresh scheduler — the one comparison Postgres used to resolve
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("aware", [True, False], ids=["aware-column", "naive-column"])
+def test_the_scheduler_selects_the_same_companies_either_column_type(monkeypatch, aware):
+    """This comparison used to run in SQL, and that was the risk.
+
+    Python raises TypeError on naive-vs-aware. Postgres does not — it coerces
+    using the session TimeZone and returns a different set of rows, silently.
+    `init_db()` only calls `create_all` and never applies Alembic, so the
+    scheduler can query either column type depending on whether the migration
+    has reached that database. Picking the wrong companies means a token
+    quietly lapses, and then every request for that company fails until a
+    human reconnects.
+
+    So the selection moved into Python, and this asserts it is stable across
+    both shapes rather than across both server settings.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.services import token_refresh_scheduler as mod
+
+    def stamp(dt):
+        return dt if aware else dt.replace(tzinfo=None)
+
+    due = SimpleNamespace(
+        code="DUE", token_status="active", refresh_token="r",
+        token_expires_at=stamp(utcnow() + timedelta(minutes=5)),
+    )
+    not_due = SimpleNamespace(
+        code="NOT-DUE", token_status="active", refresh_token="r",
+        token_expires_at=stamp(utcnow() + timedelta(hours=6)),
+    )
+    never_connected = SimpleNamespace(
+        code="NO-EXPIRY", token_status="active", refresh_token="r",
+        token_expires_at=None,
+    )
+
+    class _Query:
+        def filter(self, *a, **k):
+            return self
+
+        def all(self):
+            return [due, not_due, never_connected]
+
+    monkeypatch.setattr(mod, "SessionLocal", lambda: SimpleNamespace(
+        query=lambda *a, **k: _Query(), close=lambda: None,
+    ))
+
+    refreshed = []
+
+    # The real call, found by reading the loop rather than guessing: the
+    # scheduler does `qbo_service._refresh_token(company)`. The first version
+    # of this test patched a `_refresh_company_token` that does not exist,
+    # with raising=False, so the patch bound nothing, `refreshed` stayed empty
+    # and every assertion below passed for free. Patch what is called, and
+    # assert the positive case, or the test cannot fail.
+    from app.services.qbo_service import QBOService
+
+    monkeypatch.setattr(
+        QBOService, "__init__", lambda self, db: None, raising=True
+    )
+    monkeypatch.setattr(
+        QBOService, "_refresh_token",
+        lambda self, c: refreshed.append(c.code),
+        raising=True,
+    )
+
+    sched = mod.TokenRefreshScheduler.__new__(mod.TokenRefreshScheduler)
+    asyncio.run(sched._refresh_expiring_tokens())
+
+    assert "DUE" in refreshed, (
+        "the company inside the refresh window was not selected"
+    )
+    assert "NOT-DUE" not in refreshed, "a token with six hours left was refreshed"
+    assert "NO-EXPIRY" not in refreshed, (
+        "a NULL expiry must stay excluded, as the SQL `<=` did"
+    )

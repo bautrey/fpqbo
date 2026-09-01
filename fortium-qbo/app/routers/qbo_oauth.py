@@ -4,7 +4,7 @@ import logging
 import random
 import re
 import secrets
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import httpx
 from fastapi import APIRouter, Request

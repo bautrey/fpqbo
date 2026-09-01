@@ -1,6 +1,6 @@
 """Invoice endpoints using QBO SDK."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -139,7 +139,12 @@ async def get_trailing_12m_summary(
     whether the walk reached the end of the result set.
     """
     end_date = utcnow()
-    start_date = datetime(end_date.year - 1, end_date.month, 1)
+    # Aware, like end_date. Both are echoed back as isoformat in the response,
+    # so a naive start beside an aware end gives the caller two different
+    # timestamp shapes for the two ends of one window.
+    start_date = datetime(
+        end_date.year - 1, end_date.month, 1, tzinfo=timezone.utc
+    )
 
     # Only the fetch is caught, and it stays that way. Historically the
     # `except ValueError` here was the unknown-company signal answered with a
