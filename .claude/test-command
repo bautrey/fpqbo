@@ -56,7 +56,11 @@ else
             | "$PY" -c 'import hashlib,sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:12])')
   [ -n "$reqhash" ] || { echo "could not read fortium-qbo/requirements*.txt"; exit 125; }
   pyver=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-  VENV="${TMPDIR:-/tmp}/fpqbo-test-venv-${pyver}-${reqhash}"
+  # uid in the path: $TMPDIR is per-user on macOS, but the /tmp fallback (Linux,
+  # CI images) is world-writable, and a predictable name there is a directory
+  # another account can pre-create and fill with whatever it likes before this
+  # runs. The interpreter this gate then executes comes out of that directory.
+  VENV="${TMPDIR:-/tmp}/fpqbo-test-venv-$(id -u)-${pyver}-${reqhash}"
 
   if ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
     staging=$(mktemp -d "${TMPDIR:-/tmp}/fpqbo-venv-build.XXXXXX") || { echo "could not mktemp"; exit 125; }

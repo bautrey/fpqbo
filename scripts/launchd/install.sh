@@ -22,6 +22,15 @@ DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 cp "$SRC" "$DEST"
 
+# The plist's StandardOutPath/StandardErrorPath point into docs/scratch/, which
+# is gitignored and therefore absent from a fresh clone — the exact situation
+# this installer is for. Measured on macOS 25.6: launchd spawns the job anyway
+# and the watcher's own `mkdir -p` creates it, so this did NOT reproduce as a
+# failure. launchd's man page promises nothing about creating a log file's
+# parent, and this one line is what decides whether the watcher runs at all, so
+# the ordering is made explicit rather than left to undocumented behaviour.
+mkdir -p "$(cd "$(dirname "$0")/../.." && pwd)/docs/scratch"
+
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$DEST"
 
