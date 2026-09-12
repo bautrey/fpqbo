@@ -76,9 +76,19 @@ else
   # the checks pass on our own link while the code executed lives at the
   # attacker's target. The find is the group/other-write check; a directory
   # anyone else can write into is one anyone else can swap a binary inside.
+  #
+  # The two write bits are tested SEPARATELY and OR'd. `find -perm -0022` means
+  # "all bits in the mask", so it matches only when group AND other write are
+  # both set — it rejects 0777 and trusts 0775 and 0757, which are just as
+  # writable by somebody else. Measured:
+  #   mode 775   -perm -0022 => trust    (-0020 -o -0002) => REJECT
+  #   mode 757   -perm -0022 => trust    (-0020 -o -0002) => REJECT
+  #   mode 777   -perm -0022 => REJECT   (-0020 -o -0002) => REJECT
+  # Single-bit masks make "all bits in the mask" mean the one bit, which is the
+  # test actually wanted. Portable across BSD and GNU find, unlike +0022 / /0022.
   trustworthy() {
     [ -d "$1" ] && [ -O "$1" ] && [ ! -L "$1" ] \
-      && [ -z "$(find "$1" -maxdepth 0 -perm -0022 2>/dev/null)" ]
+      && [ -z "$(find "$1" -maxdepth 0 \( -perm -0020 -o -perm -0002 \) 2>/dev/null)" ]
   }
 
   if [ -e "$VENV" ] && ! trustworthy "$VENV"; then
