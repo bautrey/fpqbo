@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.burkeautrey.fpqbo.watch-new-customers</string>
+  <!-- A LaunchAgent, not a cron entry, and the reason is measured: cron runs in
+       the "Background" security session, where the default keychain is
+       System.keychain and the login keychain is not in the search list at all.
+       security find-generic-password returns 44 there, and an explicit keychain
+       path, list-keychains -d user, and unlock-keychain all return 36. A user
+       LaunchAgent runs in the Aqua session and can read the login keychain. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/burkestudio/projects/fpqbo/scripts/watch-new-qbo-customers.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/burkestudio/projects/fpqbo/docs/scratch/watch-new-qbo-customers.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/burkestudio/projects/fpqbo/docs/scratch/watch-new-qbo-customers.log</string>
+</dict>
+</plist>

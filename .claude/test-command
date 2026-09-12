@@ -36,17 +36,42 @@ done
 
 # Prefer a venv that already has the dev deps; otherwise build one in a cache
 # dir outside the worktree so a review checkout does not have to be dirtied.
+# The venv is keyed on a HASH of the requirements files and the interpreter, and
+# built atomically. Three separate defects that fixes:
+#   - STALE REUSE. A fixed path is reused forever, so a requirements change is
+#     invisible and the gate keeps measuring the dependency set of whenever the
+#     cache was first built. A different hash is a different directory.
+#   - THE RACE. $TMPDIR is per-USER on macOS, not per-session, so every parallel
+#     review pass on this machine shared one path and could `pip install` into it
+#     concurrently, leaving a half-populated venv. Each build now lands in a
+#     private mktemp dir and is moved into place in one atomic rename; whoever
+#     loses the race just uses the winner's, which is complete by construction.
+#   - A PARTIAL CACHE. An interrupted earlier build could leave a directory that
+#     exists but cannot import pytest. The import check gates reuse, not existence.
 VENV=""
 if [ -x venv/bin/python ] && venv/bin/python -c "import pytest, pytest_asyncio" 2>/dev/null; then
   VENV=venv
 else
-  VENV="${TMPDIR:-/tmp}/fpqbo-test-venv"
-  if ! [ -x "$VENV/bin/python" ]; then
-    "$PY" -m venv "$VENV" >/dev/null 2>&1 || { echo "could not create venv at $VENV"; exit 125; }
-  fi
+  reqhash=$(cat fortium-qbo/requirements.txt fortium-qbo/requirements-dev.txt 2>/dev/null \
+            | "$PY" -c 'import hashlib,sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:12])')
+  [ -n "$reqhash" ] || { echo "could not read fortium-qbo/requirements*.txt"; exit 125; }
+  pyver=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+  VENV="${TMPDIR:-/tmp}/fpqbo-test-venv-${pyver}-${reqhash}"
+
   if ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
-    "$VENV/bin/pip" install -q -r fortium-qbo/requirements-dev.txt >/dev/null 2>&1 \
+    staging=$(mktemp -d "${TMPDIR:-/tmp}/fpqbo-venv-build.XXXXXX") || { echo "could not mktemp"; exit 125; }
+    trap 'rm -rf "$staging"' EXIT
+    "$PY" -m venv "$staging/v" >/dev/null 2>&1 || { echo "could not create venv with $PY"; exit 125; }
+    "$staging/v/bin/pip" install -q -r fortium-qbo/requirements-dev.txt >/dev/null 2>&1 \
       || { echo "could not install fortium-qbo/requirements-dev.txt (offline?)"; exit 125; }
+    # Atomic. If a concurrent pass got there first, keep theirs and drop ours —
+    # both are built from the same hash, so they are interchangeable.
+    if [ ! -d "$VENV" ]; then
+      mv "$staging/v" "$VENV" 2>/dev/null || true
+    fi
+    rm -rf "$staging"; trap - EXIT
+    "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null \
+      || { echo "venv at $VENV is unusable after build"; exit 125; }
   fi
 fi
 
@@ -58,6 +83,13 @@ export GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET:-test}"
 
 out=$("$VENV/bin/python" -m pytest fortium-qbo/tests/ -q 2>&1); rc=$?
 echo "$out" | tail -20
+
+# pytest exit 5 is "no tests were collected", which is a measurement failure, not
+# a test failure. Reporting it as 1 blames the author for an empty suite; the
+# guards below would catch it anyway, but only after calling it red first.
+if [ $rc -eq 5 ]; then
+  echo "GATE: pytest collected no tests (exit 5) — reporting unmeasurable"; exit 125
+fi
 
 # A suite that collected nothing, or that skipped its way to green, exits 0 and
 # reads as evidence. Refuse to report that as a pass.
