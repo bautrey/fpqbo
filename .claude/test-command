@@ -60,20 +60,55 @@ else
   # CI images) is world-writable, and a predictable name there is a directory
   # another account can pre-create and fill with whatever it likes before this
   # runs. The interpreter this gate then executes comes out of that directory.
+  # The uid narrows who can collide with this path. It does NOT make the path
+  # secret — uid, python version and a sha256 prefix of two files in the repo are
+  # all public, so the full path is precomputable and an attacker only has to
+  # mkdir it first. Adding the uid and calling the hijack closed was wrong, and
+  # security-review reproduced the real consequence: a planted directory here is
+  # executed as this gate, and a planted `python` that prints "643 passed" makes
+  # the guards below report exit 0 with no test having run. A forged green out of
+  # the one signal in a review pass that is not an opinion.
+  #
+  # So the cache is only trusted when we own it outright.
   VENV="${TMPDIR:-/tmp}/fpqbo-test-venv-$(id -u)-${pyver}-${reqhash}"
 
-  if ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
+  # -O: owned by the real uid. -L rejects a symlink, which would otherwise let
+  # the checks pass on our own link while the code executed lives at the
+  # attacker's target. The find is the group/other-write check; a directory
+  # anyone else can write into is one anyone else can swap a binary inside.
+  trustworthy() {
+    [ -d "$1" ] && [ -O "$1" ] && [ ! -L "$1" ] \
+      && [ -z "$(find "$1" -maxdepth 0 -perm -0022 2>/dev/null)" ]
+  }
+
+  if [ -e "$VENV" ] && ! trustworthy "$VENV"; then
+    # Do not delete it — it is not ours to delete, and removing another account's
+    # directory is its own hazard. Build somewhere private and run from there.
+    echo "NOTE: $VENV exists but is not exclusively ours — ignoring the cache"
+    VENV=""
+  fi
+
+  if [ -z "$VENV" ] || ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
     staging=$(mktemp -d "${TMPDIR:-/tmp}/fpqbo-venv-build.XXXXXX") || { echo "could not mktemp"; exit 125; }
     trap 'rm -rf "$staging"' EXIT
     "$PY" -m venv "$staging/v" >/dev/null 2>&1 || { echo "could not create venv with $PY"; exit 125; }
     "$staging/v/bin/pip" install -q -r fortium-qbo/requirements-dev.txt >/dev/null 2>&1 \
       || { echo "could not install fortium-qbo/requirements-dev.txt (offline?)"; exit 125; }
-    # Atomic. If a concurrent pass got there first, keep theirs and drop ours —
-    # both are built from the same hash, so they are interchangeable.
-    if [ ! -d "$VENV" ]; then
-      mv "$staging/v" "$VENV" 2>/dev/null || true
+
+    if [ -n "$VENV" ] && [ ! -e "$VENV" ]; then
+      # -e, not -d: a DANGLING SYMLINK is not a directory, so the old `[ ! -d ]`
+      # was true and the mv followed the link, planting our venv wherever it
+      # pointed. Whoever wins this race, both trees came from the same hash.
+      mv "$staging/v" "$VENV" 2>/dev/null || VENV=""
     fi
-    rm -rf "$staging"; trap - EXIT
+    if [ -z "$VENV" ] || ! trustworthy "$VENV"; then
+      # Either the path was untrustworthy from the start or someone took it while
+      # we were building. Run out of staging and clean it at exit instead.
+      VENV="$staging/v"
+    else
+      rm -rf "$staging"; trap - EXIT
+    fi
+
     "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null \
       || { echo "venv at $VENV is unusable after build"; exit 125; }
   fi
