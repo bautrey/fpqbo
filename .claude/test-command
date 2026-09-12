@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Objective test signal for the review loop (bautrey/claudecode#148).
+#
+# Runs the pytest suite under fortium-qbo/tests/. Everything is stubbed — no
+# network, no QBO token, no database — so this is safe from a fresh checkout.
+#
+# Exit codes:
+#   0    tests passed
+#   1    tests failed  (the gate should go RED)
+#   125  could not measure (no python3, or dependencies could not be installed)
+#
+# Two things this deliberately does NOT do:
+#   - It does not collect the repo root. `test_sdk_invoices.py` and the other
+#     root-level scripts are deprecated legacy that import a dead Intuit app
+#     (see CLAUDE.md); collecting them fails at import for reasons unrelated to
+#     the change under review. Scope stays on fortium-qbo/tests/.
+#   - It does not use `-p no:cacheprovider` tricks or disable plugin autoload.
+#     piper measured PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 turning 54 async tests
+#     into silent skips on a run that still exited 0. This suite needs
+#     pytest-asyncio loaded; if it ever stops loading, the asserts below catch it.
+
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$0")")" || exit 125
+
+# Match production's interpreter when it is available. fortium-qbo/Dockerfile is
+# python:3.11-slim, this machine's default python3 is 3.13, and a venv built from
+# scratch resolved 3.14.5 — three different stacks, and most of
+# fortium-qbo/requirements.txt is unpinned ranges (see fpqbo#28). A gate that
+# measures 3.14 while prod runs 3.11 can go green on a stack nobody ships.
+PY=""
+for cand in python3.11 python3; do
+  command -v "$cand" >/dev/null 2>&1 && { PY="$cand"; break; }
+done
+[ -n "$PY" ] || { echo "no python3 on PATH"; exit 125; }
+[ "$PY" = "python3.11" ] || echo "NOTE: python3.11 not found, measuring on $($PY -V 2>&1); prod runs 3.11"
+
+# Prefer a venv that already has the dev deps; otherwise build one in a cache
+# dir outside the worktree so a review checkout does not have to be dirtied.
+VENV=""
+if [ -x venv/bin/python ] && venv/bin/python -c "import pytest, pytest_asyncio" 2>/dev/null; then
+  VENV=venv
+else
+  VENV="${TMPDIR:-/tmp}/fpqbo-test-venv"
+  if ! [ -x "$VENV/bin/python" ]; then
+    "$PY" -m venv "$VENV" >/dev/null 2>&1 || { echo "could not create venv at $VENV"; exit 125; }
+  fi
+  if ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
+    "$VENV/bin/pip" install -q -r fortium-qbo/requirements-dev.txt >/dev/null 2>&1 \
+      || { echo "could not install fortium-qbo/requirements-dev.txt (offline?)"; exit 125; }
+  fi
+fi
+
+# app.config.Settings() validates these at import time, so the suite cannot even
+# collect without them. They are dummies; nothing here authenticates anywhere.
+export APP_SECRET_KEY="${APP_SECRET_KEY:-$("$PY" -c 'print("a"*32)')}"
+export GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-test}"
+export GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET:-test}"
+
+out=$("$VENV/bin/python" -m pytest fortium-qbo/tests/ -q 2>&1); rc=$?
+echo "$out" | tail -20
+
+# A suite that collected nothing, or that skipped its way to green, exits 0 and
+# reads as evidence. Refuse to report that as a pass.
+if [ $rc -eq 0 ]; then
+  if echo "$out" | grep -qE '^no tests ran'; then
+    echo "GATE: pytest collected nothing — reporting unmeasurable, not pass"; exit 125
+  fi
+  # grep -oE, not sed with a leading .*[^0-9] — pytest prints "663 passed in
+  # 5.53s" at the START of the line, so a required non-digit before the count
+  # never matches and every run reports unmeasurable.
+  passed=$(echo "$out" | grep -oE '[0-9]+ passed' | tail -1 | grep -oE '[0-9]+')
+  if [ -z "${passed:-}" ] || [ "$passed" -lt 600 ]; then
+    echo "GATE: expected 600+ passing tests, summary said '${passed:-none}' — reporting unmeasurable"; exit 125
+  fi
+fi
+exit $rc
