@@ -3,10 +3,11 @@
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import ForeignKey, Index, Integer, String
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.utils.clock import utcnow
 
 if TYPE_CHECKING:
     from app.models.api_key import ApiKey
@@ -36,8 +37,8 @@ class RequestLog(Base):
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
 
     # Timestamp (indexed for time-based queries)
-    created_at: Mapped[datetime] = mapped_column(
-        nullable=False, default=datetime.utcnow, index=True
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), 
+        nullable=False, default=utcnow, index=True
     )
 
     # Relationships

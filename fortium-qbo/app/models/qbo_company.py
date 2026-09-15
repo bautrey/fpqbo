@@ -3,10 +3,11 @@
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, Index, String, Text, false
+from sqlalchemy import Boolean, DateTime, Index, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.utils.clock import utcnow
 
 if TYPE_CHECKING:
     from app.models.api_key import ApiKey
@@ -41,14 +42,14 @@ class QboCompany(Base):
     # OAuth tokens
     access_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     refresh_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    token_expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     token_status: Mapped[str] = mapped_column(String(20), default="active")
-    last_refreshed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    refresh_token_expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    last_refreshed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    refresh_token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(
-        nullable=False, default=datetime.utcnow
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), 
+        nullable=False, default=utcnow
     )
 
     # Relationships
