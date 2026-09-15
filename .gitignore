@@ -16,7 +16,8 @@ __pycache__/
 .DS_Store
 
 # Claude
-.claude/
+.claude/*
+!.claude/test-command
 
 # Backup files
 *.bak
@@ -30,3 +31,6 @@ yir2025/venv/
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Session scratch outputs (not tracked)
+docs/scratch/

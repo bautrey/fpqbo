@@ -6,10 +6,16 @@ on:
     paths:
       - 'fortium-qbo/**'
       - '.github/workflows/ci.yml'
+      - '.claude/test-command'
   pull_request:
     paths:
       - 'fortium-qbo/**'
       - '.github/workflows/ci.yml'
+      # The review loop's test gate. It decides whether a PR's tests pass, so a
+      # change to it must run the suite — otherwise the one file that can silence
+      # every test is the one file CI never exercises. This PR declared it and
+      # got no CI run at all, which is how the gap was found.
+      - '.claude/test-command'
 
 jobs:
   test:

@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Objective test signal for the review loop (bautrey/claudecode#148).
+#
+# Runs the pytest suite under fortium-qbo/tests/. Everything is stubbed — no
+# network, no QBO token, no database — so this is safe from a fresh checkout.
+#
+# Exit codes:
+#   0    tests passed
+#   1    tests failed  (the gate should go RED)
+#   125  could not measure (no python3, or dependencies could not be installed)
+#
+# Two things this deliberately does NOT do:
+#   - It does not collect the repo root. `test_sdk_invoices.py` and the other
+#     root-level scripts are deprecated legacy that import a dead Intuit app
+#     (see CLAUDE.md); collecting them fails at import for reasons unrelated to
+#     the change under review. Scope stays on fortium-qbo/tests/.
+#   - It does not use `-p no:cacheprovider` tricks or disable plugin autoload.
+#     piper measured PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 turning 54 async tests
+#     into silent skips on a run that still exited 0. This suite needs
+#     pytest-asyncio loaded; if it ever stops loading, the asserts below catch it.
+
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$0")")" || exit 125
+
+# Match production's interpreter when it is available. fortium-qbo/Dockerfile is
+# python:3.11-slim, this machine's default python3 is 3.13, and a venv built from
+# scratch resolved 3.14.5 — three different stacks, and most of
+# fortium-qbo/requirements.txt is unpinned ranges (see fpqbo#28). A gate that
+# measures 3.14 while prod runs 3.11 can go green on a stack nobody ships.
+PY=""
+for cand in python3.11 python3; do
+  command -v "$cand" >/dev/null 2>&1 && { PY="$cand"; break; }
+done
+[ -n "$PY" ] || { echo "no python3 on PATH"; exit 125; }
+[ "$PY" = "python3.11" ] || echo "NOTE: python3.11 not found, measuring on $($PY -V 2>&1); prod runs 3.11"
+
+# Prefer a venv that already has the dev deps; otherwise build one in a cache
+# dir outside the worktree so a review checkout does not have to be dirtied.
+# The venv is keyed on a HASH of the requirements files and the interpreter, and
+# built atomically. Three separate defects that fixes:
+#   - STALE REUSE. A fixed path is reused forever, so a requirements change is
+#     invisible and the gate keeps measuring the dependency set of whenever the
+#     cache was first built. A different hash is a different directory.
+#   - THE RACE. $TMPDIR is per-USER on macOS, not per-session, so every parallel
+#     review pass on this machine shared one path and could `pip install` into it
+#     concurrently, leaving a half-populated venv. Each build now lands in a
+#     private mktemp dir and is moved into place in one atomic rename; whoever
+#     loses the race just uses the winner's, which is complete by construction.
+#   - A PARTIAL CACHE. An interrupted earlier build could leave a directory that
+#     exists but cannot import pytest. The import check gates reuse, not existence.
+VENV=""
+if [ -x venv/bin/python ] && venv/bin/python -c "import pytest, pytest_asyncio" 2>/dev/null; then
+  VENV=venv
+else
+  reqhash=$(cat fortium-qbo/requirements.txt fortium-qbo/requirements-dev.txt 2>/dev/null \
+            | "$PY" -c 'import hashlib,sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:12])')
+  [ -n "$reqhash" ] || { echo "could not read fortium-qbo/requirements*.txt"; exit 125; }
+  pyver=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+  # uid in the path: $TMPDIR is per-user on macOS, but the /tmp fallback (Linux,
+  # CI images) is world-writable, and a predictable name there is a directory
+  # another account can pre-create and fill with whatever it likes before this
+  # runs. The interpreter this gate then executes comes out of that directory.
+  # The uid narrows who can collide with this path. It does NOT make the path
+  # secret — uid, python version and a sha256 prefix of two files in the repo are
+  # all public, so the full path is precomputable and an attacker only has to
+  # mkdir it first. Adding the uid and calling the hijack closed was wrong, and
+  # security-review reproduced the real consequence: a planted directory here is
+  # executed as this gate, and a planted `python` that prints "643 passed" makes
+  # the guards below report exit 0 with no test having run. A forged green out of
+  # the one signal in a review pass that is not an opinion.
+  #
+  # So the cache is only trusted when we own it outright.
+  VENV="${TMPDIR:-/tmp}/fpqbo-test-venv-$(id -u)-${pyver}-${reqhash}"
+
+  # -O: owned by the real uid. -L rejects a symlink, which would otherwise let
+  # the checks pass on our own link while the code executed lives at the
+  # attacker's target. The find is the group/other-write check; a directory
+  # anyone else can write into is one anyone else can swap a binary inside.
+  #
+  # The two write bits are tested SEPARATELY and OR'd. `find -perm -0022` means
+  # "all bits in the mask", so it matches only when group AND other write are
+  # both set — it rejects 0777 and trusts 0775 and 0757, which are just as
+  # writable by somebody else. Measured:
+  #   mode 775   -perm -0022 => trust    (-0020 -o -0002) => REJECT
+  #   mode 757   -perm -0022 => trust    (-0020 -o -0002) => REJECT
+  #   mode 777   -perm -0022 => REJECT   (-0020 -o -0002) => REJECT
+  # Single-bit masks make "all bits in the mask" mean the one bit, which is the
+  # test actually wanted. Portable across BSD and GNU find, unlike +0022 / /0022.
+  trustworthy() {
+    [ -d "$1" ] && [ -O "$1" ] && [ ! -L "$1" ] \
+      && [ -z "$(find "$1" -maxdepth 0 \( -perm -0020 -o -perm -0002 \) 2>/dev/null)" ]
+  }
+
+  if [ -e "$VENV" ] && ! trustworthy "$VENV"; then
+    # Do not delete it — it is not ours to delete, and removing another account's
+    # directory is its own hazard. Build somewhere private and run from there.
+    echo "NOTE: $VENV exists but is not exclusively ours — ignoring the cache"
+    VENV=""
+  fi
+
+  if [ -z "$VENV" ] || ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
+    staging=$(mktemp -d "${TMPDIR:-/tmp}/fpqbo-venv-build.XXXXXX") || { echo "could not mktemp"; exit 125; }
+    trap 'rm -rf "$staging"' EXIT
+    "$PY" -m venv "$staging/v" >/dev/null 2>&1 || { echo "could not create venv with $PY"; exit 125; }
+    "$staging/v/bin/pip" install -q -r fortium-qbo/requirements-dev.txt >/dev/null 2>&1 \
+      || { echo "could not install fortium-qbo/requirements-dev.txt (offline?)"; exit 125; }
+
+    if [ -n "$VENV" ] && [ ! -e "$VENV" ]; then
+      # -e, not -d: a DANGLING SYMLINK is not a directory, so the old `[ ! -d ]`
+      # was true and the mv followed the link, planting our venv wherever it
+      # pointed. Whoever wins this race, both trees came from the same hash.
+      mv "$staging/v" "$VENV" 2>/dev/null || VENV=""
+    fi
+    if [ -z "$VENV" ] || ! trustworthy "$VENV"; then
+      # Either the path was untrustworthy from the start or someone took it while
+      # we were building. Run out of staging and clean it at exit instead.
+      VENV="$staging/v"
+    else
+      rm -rf "$staging"; trap - EXIT
+    fi
+
+    "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null \
+      || { echo "venv at $VENV is unusable after build"; exit 125; }
+  fi
+fi
+
+# app.config.Settings() validates these at import time, so the suite cannot even
+# collect without them. They are dummies; nothing here authenticates anywhere.
+export APP_SECRET_KEY="${APP_SECRET_KEY:-$("$PY" -c 'print("a"*32)')}"
+export GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-test}"
+export GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET:-test}"
+
+out=$("$VENV/bin/python" -m pytest fortium-qbo/tests/ -q 2>&1); rc=$?
+echo "$out" | tail -20
+
+# pytest exit 5 is "no tests were collected", which is a measurement failure, not
+# a test failure. Reporting it as 1 blames the author for an empty suite; the
+# guards below would catch it anyway, but only after calling it red first.
+if [ $rc -eq 5 ]; then
+  echo "GATE: pytest collected no tests (exit 5) — reporting unmeasurable"; exit 125
+fi
+
+# A suite that collected nothing, or that skipped its way to green, exits 0 and
+# reads as evidence. Refuse to report that as a pass.
+if [ $rc -eq 0 ]; then
+  if echo "$out" | grep -qE '^no tests ran'; then
+    echo "GATE: pytest collected nothing — reporting unmeasurable, not pass"; exit 125
+  fi
+  # grep -oE, not sed with a leading .*[^0-9] — pytest prints "663 passed in
+  # 5.53s" at the START of the line, so a required non-digit before the count
+  # never matches and every run reports unmeasurable.
+  passed=$(echo "$out" | grep -oE '[0-9]+ passed' | tail -1 | grep -oE '[0-9]+')
+  if [ -z "${passed:-}" ] || [ "$passed" -lt 600 ]; then
+    echo "GATE: expected 600+ passing tests, summary said '${passed:-none}' — reporting unmeasurable"; exit 125
+  fi
+fi
+exit $rc
