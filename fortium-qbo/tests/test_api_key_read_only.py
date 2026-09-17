@@ -198,6 +198,22 @@ def test_no_get_route_calls_a_mutating_service_method():
     If someone adds a GET handler that creates or deletes something in QBO, a
     read-only key would reach it and the whole control is void. This fails at
     that moment rather than at the moment somebody notices.
+
+    TWO THINGS IT DOES NOT SEE, so nobody reads more into a pass than it earned:
+
+    - It inspects ``ast.Attribute`` calls only, so a GET calling a module-level
+      mutator by bare name — an imported ``create_*``, or ``run_qbo_write`` —
+      would not trigger it.
+    - It recognises a GET by the ``@router.get`` decorator, so one registered
+      via ``router.api_route(..., methods=["GET"])`` would not be scanned at all.
+
+    Both are unreachable in this tree today and were checked rather than assumed:
+    ``api_route`` appears nowhere in app/routers, and a widened scan across all
+    85 GET handlers finds one bare-name mutating call, ``auth.py:callback ->
+    create_session``, which creates an admin login session rather than anything
+    in QuickBooks and is not behind an API key at all. Widening the scan to catch
+    it would make this test permanently red on a false positive, which is why it
+    is documented instead of broadened.
     """
     routers = pathlib.Path(__file__).resolve().parent.parent / "app" / "routers"
     assert routers.is_dir(), routers
