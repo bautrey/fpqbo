@@ -21,6 +21,10 @@ class CreateApiKeyRequest(BaseModel):
 
     name: str
     company_id: int
+    # Defaults to a read-only key. An omitted field therefore yields the safe
+    # one, so a caller has to ask for write access rather than forget to
+    # decline it.
+    can_write: bool = False
 
 
 class CreateApiKeyResponse(BaseModel):
@@ -32,6 +36,7 @@ class CreateApiKeyResponse(BaseModel):
     api_key: str  # Full key - only returned on creation
     company_id: int
     company_name: str
+    can_write: bool
     message: str = "Save this API key now. It will not be shown again."
 
 
@@ -44,6 +49,7 @@ class ApiKeyInfo(BaseModel):
     company_id: int
     company_name: str
     is_active: bool
+    can_write: bool
     created_at: datetime
     last_used_at: datetime | None
 
@@ -78,6 +84,7 @@ async def create_api_key(
         name=request.name,
         company_id=request.company_id,
         is_active=True,
+        can_write=request.can_write,
         created_at=utcnow(),
     )
     db.add(api_key)
@@ -91,6 +98,7 @@ async def create_api_key(
         api_key=full_key,
         company_id=company.id,
         company_name=company.name,
+        can_write=api_key.can_write,
     )
 
 
@@ -123,6 +131,7 @@ async def list_api_keys(
             company_id=key.company_id,
             company_name=key.company.name,
             is_active=key.is_active,
+            can_write=key.can_write,
             created_at=key.created_at,
             last_used_at=key.last_used_at,
         )

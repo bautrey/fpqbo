@@ -67,36 +67,62 @@ def _ensure_additive_columns() -> None:
     Alembic migrations remain the source of truth for schema history; this is
     the deploy-time safety net given create_all is the only startup hook.
     """
+    _add_column_if_missing(
+        "qbo_companies",
+        "is_sandbox",
+        "BOOLEAN NOT NULL DEFAULT false",
+    )
+    _add_column_if_missing(
+        "api_keys",
+        "can_write",
+        "BOOLEAN NOT NULL DEFAULT false",
+        # Runs ONLY on the boot that adds the column, never afterwards. The
+        # column defaults to false, so without this every key already in use
+        # would start answering 403 to its writes — the Payouts keys create
+        # bill payments and vendor credits today.
+        #
+        # It has to sit inside the add, not beside it: this guard runs on every
+        # boot, so a backfill outside that condition would re-grant write to
+        # every active key on each deploy and silently undo any key an admin had
+        # since made read-only.
+        backfill="UPDATE api_keys SET can_write = true WHERE is_active = true",
+    )
+
+
+def _add_column_if_missing(
+    table: str, column: str, ddl_type: str, backfill: str | None = None
+) -> None:
+    """Add ``column`` to ``table`` when absent, optionally seeding existing rows.
+
+    ``ddl_type`` is spelled so it is valid on both PostgreSQL and SQLite, since
+    render.yaml still points DATABASE_URL at sqlite for local runs.
+
+    ``backfill`` executes in the same transaction as the ALTER and only on the
+    boot that performs it, so it describes the state existing rows should start
+    in rather than a state this function keeps re-asserting.
+    """
     inspector = inspect(engine)
-    if "qbo_companies" not in inspector.get_table_names():
+    if table not in inspector.get_table_names():
+        return
+    if column in {col["name"] for col in inspector.get_columns(table)}:
         return
 
-    existing_columns = {col["name"] for col in inspector.get_columns("qbo_companies")}
-    if "is_sandbox" not in existing_columns:
-        # BOOLEAN NOT NULL DEFAULT false is valid on both PostgreSQL and SQLite.
-        try:
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "ALTER TABLE qbo_companies "
-                        "ADD COLUMN is_sandbox BOOLEAN NOT NULL DEFAULT false"
-                    )
-                )
-            logger.info("Added missing column qbo_companies.is_sandbox")
-        except (OperationalError, ProgrammingError):
-            # Another instance may add the column concurrently on first deploy
-            # (Postgres -> DuplicateColumn/ProgrammingError, SQLite ->
-            # OperationalError). Re-check rather than crash the boot; only
-            # re-raise if the column is genuinely still missing.
-            columns_after = {
-                col["name"] for col in inspect(engine).get_columns("qbo_companies")
-            }
-            if "is_sandbox" in columns_after:
-                logger.info(
-                    "qbo_companies.is_sandbox was added concurrently; continuing"
-                )
-            else:
-                raise
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+            if backfill:
+                conn.execute(text(backfill))
+        logger.info("Added missing column %s.%s", table, column)
+    except (OperationalError, ProgrammingError):
+        # Another instance may add the column concurrently on first deploy
+        # (Postgres -> DuplicateColumn/ProgrammingError, SQLite ->
+        # OperationalError). Re-check rather than crash the boot; only
+        # re-raise if the column is genuinely still missing.
+        columns_after = {col["name"] for col in inspect(engine).get_columns(table)}
+        if column in columns_after:
+            logger.info("%s.%s was added concurrently; continuing", table, column)
+        else:
+            raise
 
 
 def get_db() -> Generator[Session, None, None]:
