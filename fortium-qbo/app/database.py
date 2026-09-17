@@ -67,15 +67,20 @@ def _ensure_additive_columns() -> None:
     Alembic migrations remain the source of truth for schema history; this is
     the deploy-time safety net given create_all is the only startup hook.
     """
+    # Each ALTER is spelled out whole rather than assembled from parts. An
+    # f-string reaching sqlalchemy.text() is a SQL-injection taint source
+    # whatever it interpolates, so building the statement here keeps every
+    # character of executed SQL a literal you can read at its call site.
+    # BOOLEAN NOT NULL DEFAULT false is valid on both PostgreSQL and SQLite.
     _add_column_if_missing(
         "qbo_companies",
         "is_sandbox",
-        "BOOLEAN NOT NULL DEFAULT false",
+        "ALTER TABLE qbo_companies ADD COLUMN is_sandbox BOOLEAN NOT NULL DEFAULT false",
     )
     _add_column_if_missing(
         "api_keys",
         "can_write",
-        "BOOLEAN NOT NULL DEFAULT false",
+        "ALTER TABLE api_keys ADD COLUMN can_write BOOLEAN NOT NULL DEFAULT false",
         # Runs ONLY on the boot that adds the column, never afterwards. The
         # column defaults to false, so without this every key already in use
         # would start answering 403 to its writes — the Payouts keys create
@@ -90,12 +95,14 @@ def _ensure_additive_columns() -> None:
 
 
 def _add_column_if_missing(
-    table: str, column: str, ddl_type: str, backfill: str | None = None
+    table: str, column: str, add_column_sql: str, backfill: str | None = None
 ) -> None:
-    """Add ``column`` to ``table`` when absent, optionally seeding existing rows.
+    """Run ``add_column_sql`` when ``table.column`` is absent, seeding existing rows.
 
-    ``ddl_type`` is spelled so it is valid on both PostgreSQL and SQLite, since
-    render.yaml still points DATABASE_URL at sqlite for local runs.
+    ``table`` and ``column`` are what this function INSPECTS; ``add_column_sql``
+    is the complete statement it EXECUTES. They are separate parameters rather
+    than one assembled string so that no SQL is built here — see the note at the
+    call sites.
 
     ``backfill`` executes in the same transaction as the ALTER and only on the
     boot that performs it, so it describes the state existing rows should start
@@ -109,7 +116,7 @@ def _add_column_if_missing(
 
     try:
         with engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+            conn.execute(text(add_column_sql))
             if backfill:
                 conn.execute(text(backfill))
         logger.info("Added missing column %s.%s", table, column)
