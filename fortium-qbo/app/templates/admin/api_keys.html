@@ -78,6 +78,7 @@
                             <th>Key Prefix</th>
                             <th>Company</th>
                             <th>Status</th>
+                            <th>Access</th>
                             <th>Created</th>
                             <th>Last Used</th>
                             <th class="text-end">Actions</th>
@@ -94,6 +95,13 @@
                                 <span class="badge bg-success">Active</span>
                                 {% else %}
                                 <span class="badge bg-secondary">Revoked</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if key.can_write %}
+                                <span class="badge bg-warning text-dark" title="Can create, update and delete in QuickBooks">Read/Write</span>
+                                {% else %}
+                                <span class="badge bg-info text-dark" title="GET only; writes are refused with 403">Read-only</span>
                                 {% endif %}
                             </td>
                             <td><small>{{ key.created_at.strftime('%Y-%m-%d %H:%M') }}</small></td>
@@ -199,6 +207,20 @@
                         </select>
                         <div class="form-text">The QBO company this key can access</div>
                     </div>
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="canWrite">
+                            <label class="form-check-label" for="canWrite">
+                                Allow writes
+                            </label>
+                        </div>
+                        <div class="form-text">
+                            Leave unchecked for a read-only key: it can GET and HEAD anything
+                            for its company but is refused with 403 on any create, update, void
+                            or delete. Only tick this for a consumer that genuinely posts to
+                            QuickBooks.
+                        </div>
+                    </div>
                 </form>
             </div>
             <div class="modal-footer">
@@ -227,7 +249,11 @@ async function createApiKey() {
         const response = await fetch('/admin/api-keys/', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({name: name, company_id: parseInt(companyId)})
+            body: JSON.stringify({
+                name: name,
+                company_id: parseInt(companyId),
+                can_write: document.getElementById('canWrite').checked
+            })
         });
 
         const result = await response.json();

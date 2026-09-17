@@ -84,6 +84,23 @@ async def verify_api_key(
             detail="API key is not authorized for this company.",
         )
 
+    # Enforce write scoping: a read-only key may only issue GET/HEAD.
+    #
+    # Gating on the verb is sound here because it was measured, not assumed: an
+    # AST scan of every @router.get handler in every router, looking for calls
+    # to create_/update_/delete_/void_/save, returns zero hits. No GET route
+    # mutates, so the method is a faithful proxy for intent. That is the
+    # assumption to re-check if a mutating GET is ever added.
+    #
+    # This sits after the company check on purpose. A key aimed at the wrong
+    # company should hear about the company, whichever verb it used — reporting
+    # "read-only" there would send the caller to fix the wrong thing.
+    if request.method not in ("GET", "HEAD") and not api_key.can_write:
+        raise HTTPException(
+            status_code=403,
+            detail="This API key is read-only.",
+        )
+
     return api_key
 
 

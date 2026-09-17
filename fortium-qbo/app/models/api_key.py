@@ -42,6 +42,20 @@ class ApiKey(Base):
     # Status
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Authorization. False means the key may only issue GET/HEAD; verify_api_key
+    # answers 403 to anything else. Default false so a key created without
+    # thinking about it is the safe one — the dangerous direction has to be
+    # chosen deliberately.
+    #
+    # server_default, unlike is_active above, because this column is added to an
+    # already-populated table. A Python-side default alone would leave existing
+    # rows NULL against a NOT NULL column, and the deploy-time guard in
+    # app.database._ensure_additive_columns issues raw DDL that never consults
+    # the Python default at all.
+    can_write: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), 
         nullable=False, default=utcnow

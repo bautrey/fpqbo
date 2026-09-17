@@ -49,9 +49,16 @@ class _FakeDB:
         pass
 
 
-def _make_key(company_id: int = 1):
+def _make_key(company_id: int = 1, can_write: bool = True):
+    # can_write defaults True here so this file keeps testing what it is about —
+    # company scoping — without every case tripping the write check first. The
+    # read-only behaviour has its own file.
     return SimpleNamespace(
-        id=1, company_id=company_id, is_active=True, last_used_at=None
+        id=1,
+        company_id=company_id,
+        is_active=True,
+        can_write=can_write,
+        last_used_at=None,
     )
 
 
@@ -65,8 +72,12 @@ def _run(coro):
 
 
 class _FakeRequest:
-    def __init__(self):
+    def __init__(self, method: str = "GET"):
         self.state = SimpleNamespace()
+        # verify_api_key reads request.method for the write check. Defaulting to
+        # GET keeps every case in this file exercising company scoping rather
+        # than tripping the write check on the way there.
+        self.method = method
 
 
 def test_unit_allows_matching_company():
