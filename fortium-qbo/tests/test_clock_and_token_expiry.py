@@ -262,3 +262,151 @@ def test_the_scheduler_selects_the_same_companies_either_column_type(monkeypatch
     assert "NO-EXPIRY" not in refreshed, (
         "a NULL expiry must stay excluded, as the SQL `<=` did"
     )
+
+
+# ---------------------------------------------------------------------------
+# Expiries Intuit stated, rather than expiries we assumed (#34)
+# ---------------------------------------------------------------------------
+#
+# Five call sites wrote `utcnow() + timedelta(hours=1)` and
+# `utcnow() + timedelta(days=100)` while the token response that had just
+# arrived carried both real lifetimes. Those constants are Intuit's documented
+# defaults, so the stored value was usually right by coincidence — and nothing
+# here would have noticed the day it stopped being.
+#
+# The access-token expiry is what the scheduler refreshes against. Storing one
+# longer than the truth means requests failing on an expired token the service
+# believes is live, and the failure surfaces as a QuickBooks 401 rather than as
+# anything pointing at this.
+
+from app.utils.token_status import (
+    FALLBACK_ACCESS_TOKEN_LIFETIME,
+    FALLBACK_REFRESH_TOKEN_LIFETIME,
+    token_expiries,
+)
+
+
+class _AuthClient:
+    """An intuitlib AuthClient after a token call, as send_request leaves it.
+
+    `intuitlib.utils.send_request` does `set_attributes(obj, response.json())`
+    on any 200 with a body, and that copies EVERY key of the token response
+    onto the client — which is why these two attributes are readable at all.
+    """
+
+    def __init__(self, expires_in=3600, x_refresh_token_expires_in=8726400):
+        self.expires_in = expires_in
+        self.x_refresh_token_expires_in = x_refresh_token_expires_in
+
+
+def _minutes(delta):
+    return round(delta.total_seconds() / 60)
+
+
+def test_the_stored_expiry_tracks_what_intuit_said_not_the_constant():
+    """The test that fails against the code this replaces.
+
+    A 30-minute access token is the case the constants get wrong in the
+    dangerous direction: the old code stored 60 minutes, so for half an hour
+    the service believed a dead token was live.
+    """
+    before = utcnow()
+    access, refresh = token_expiries(_AuthClient(expires_in=1800))
+
+    assert 29 <= _minutes(access - before) <= 31, access
+    assert _minutes(access - before) != 60, "stored the constant, not Intuit's value"
+
+
+def test_a_longer_lived_token_is_not_truncated_to_the_constant():
+    """The other direction: an expiry shorter than the truth refreshes early.
+
+    Harmless for correctness and not free — every premature refresh spends an
+    Intuit rate-limit slot and rotates a refresh token that had not expired.
+    """
+    before = utcnow()
+    access, _ = token_expiries(_AuthClient(expires_in=7200))
+
+    assert 119 <= _minutes(access - before) <= 121
+
+
+def test_the_refresh_token_expiry_comes_from_intuit_too():
+    before = utcnow()
+    _, refresh = token_expiries(_AuthClient(x_refresh_token_expires_in=60 * 60 * 24 * 45))
+
+    assert 44 <= (refresh - before).days <= 45
+
+
+@pytest.mark.parametrize("value", ["3600", 3600])
+def test_a_string_of_seconds_is_the_same_fact_as_a_number(value):
+    """Intuit sends these as JSON numbers and has been seen sending strings.
+
+    A type check would have taken the fallback on the string and looked exactly
+    like the bug this replaces: a plausible expiry, silently not Intuit's.
+    """
+    before = utcnow()
+    access, _ = token_expiries(_AuthClient(expires_in=value))
+
+    assert 59 <= _minutes(access - before) <= 61
+
+
+@pytest.mark.parametrize(
+    "missing", [None], ids=["absent"]
+)
+def test_an_absent_value_falls_back_to_the_documented_default(missing):
+    before = utcnow()
+    access, refresh = token_expiries(
+        _AuthClient(expires_in=missing, x_refresh_token_expires_in=missing)
+    )
+
+    assert _minutes(access - before) == _minutes(FALLBACK_ACCESS_TOKEN_LIFETIME)
+    assert (refresh - before).days == FALLBACK_REFRESH_TOKEN_LIFETIME.days
+
+
+@pytest.mark.parametrize("bad", [0, -1, "", "soon", [], {}], ids=
+                         ["zero", "negative", "empty", "words", "list", "dict"])
+def test_a_value_that_would_store_a_past_expiry_is_refused(bad):
+    """The one guard that is not cosmetic.
+
+    A zero or negative lifetime stores an expiry already behind us, and the
+    scheduler reads a past expiry as "refresh now" — so one malformed response
+    becomes a refresh attempt on every scheduler tick, against Intuit's rate
+    limits, for as long as the response keeps coming back malformed.
+    """
+    before = utcnow()
+    access, _ = token_expiries(_AuthClient(expires_in=bad))
+
+    assert access > before, "stored an expiry in the past"
+    assert _minutes(access - before) == _minutes(FALLBACK_ACCESS_TOKEN_LIFETIME)
+
+
+def test_a_client_that_never_saw_a_token_response_still_answers():
+    """`getattr(..., None)` rather than attribute access.
+
+    An AuthClient built but never used has neither attribute set to anything
+    but None, and a refresh path that raised AttributeError here would turn a
+    token problem into a 500 inside the refresh handler.
+    """
+    class _Bare:
+        pass
+
+    before = utcnow()
+    access, refresh = token_expiries(_Bare())
+
+    assert _minutes(access - before) == _minutes(FALLBACK_ACCESS_TOKEN_LIFETIME)
+    assert (refresh - before).days == FALLBACK_REFRESH_TOKEN_LIFETIME.days
+
+
+def test_the_two_lifetimes_are_read_independently():
+    """A single shared value would make one of the two silently wrong.
+
+    They are different fields with different magnitudes — an hour against a
+    hundred days — so crossing them is the kind of mistake that still produces
+    plausible-looking rows.
+    """
+    before = utcnow()
+    access, refresh = token_expiries(
+        _AuthClient(expires_in=1800, x_refresh_token_expires_in=60 * 60 * 24 * 10)
+    )
+
+    assert 29 <= _minutes(access - before) <= 31
+    assert 9 <= (refresh - before).days <= 10

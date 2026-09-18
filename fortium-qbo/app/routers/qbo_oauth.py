@@ -18,6 +18,7 @@ from app.database import SessionLocal
 from app.models import AdminUser
 from app.models.qbo_company import QboCompany
 from app.services.session_service import verify_session
+from app.utils.token_status import token_expiries
 from app.utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
@@ -341,6 +342,8 @@ async def qbo_callback(
 
         access_token = auth_client.access_token
         refresh_token = auth_client.refresh_token
+        # Intuit states both lifetimes in the token response it just sent.
+        token_expires_at, refresh_token_expires_at = token_expiries(auth_client)
 
         if not access_token or not refresh_token:
             logger.error("Token exchange returned empty tokens")
@@ -364,8 +367,8 @@ async def qbo_callback(
                 # Update existing company
                 existing.access_token = access_token
                 existing.refresh_token = refresh_token
-                existing.token_expires_at = utcnow() + timedelta(hours=1)
-                existing.refresh_token_expires_at = utcnow() + timedelta(days=100)
+                existing.token_expires_at = token_expires_at
+                existing.refresh_token_expires_at = refresh_token_expires_at
                 existing.token_status = "active"
                 existing.last_refreshed_at = utcnow()
                 existing.is_sandbox = is_sandbox
@@ -384,8 +387,8 @@ async def qbo_callback(
                     is_sandbox=is_sandbox,
                     access_token=access_token,
                     refresh_token=refresh_token,
-                    token_expires_at=utcnow() + timedelta(hours=1),
-                    refresh_token_expires_at=utcnow() + timedelta(days=100),
+                    token_expires_at=token_expires_at,
+                    refresh_token_expires_at=refresh_token_expires_at,
                     token_status="active",
                     last_refreshed_at=utcnow(),
                 )
@@ -545,8 +548,9 @@ async def refresh_company_token(request: Request, company_id: int):
             # Update company record
             company.access_token = auth_client.access_token
             company.refresh_token = auth_client.refresh_token
-            company.token_expires_at = utcnow() + timedelta(hours=1)
-            company.refresh_token_expires_at = utcnow() + timedelta(days=100)
+            company.token_expires_at, company.refresh_token_expires_at = (
+                token_expiries(auth_client)
+            )
             company.token_status = "active"
             company.last_refreshed_at = utcnow()
 
