@@ -245,6 +245,30 @@ def test_offset_reaches_quickbooks_as_a_one_based_startposition(
 
 
 @pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
+def test_every_paged_query_orders_by_id(monkeypatch, attr, method):
+    """The premise of the whole mechanism, and nothing asserted it until now.
+
+    An offset only means the same thing on two requests if the rows come back
+    in the same order both times. QuickBooks does not promise an order for an
+    unordered query — measured against production, `/api/items/`,
+    `/api/customers/`, `/api/tax/codes` and `/api/reference/terms` all answer
+    in something other than Id order — so without an explicit ORDERBY a caller
+    walking offsets can see a row twice and never see another at all.
+
+    This is also the behaviour change the thirteen converted endpoints carry:
+    they used to reach QuickBooks through `filter()` / `all()` with
+    `order_by=""`, which emits no ORDERBY, and they now order by Id like the
+    seventeen that were already paged.
+    """
+    entity = _FakeEntity(ledger_size=2500)
+    svc = _service(monkeypatch, attr, entity)
+
+    asyncio.run(getattr(svc, method)(company_id=1, offset=500))
+
+    assert entity.queries[0]["order_by"] == "Id", entity.queries[0]
+
+
+@pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
 def test_offset_zero_is_startposition_one(monkeypatch, attr, method):
     """The wire offset is 0-based; QuickBooks' STARTPOSITION is 1-based."""
     entity = _FakeEntity(ledger_size=10)
