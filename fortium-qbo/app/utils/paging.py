@@ -67,6 +67,10 @@ class PagedResult:
             ``rows``. None only when QBO answered the COUNT query without a
             ``totalCount``, which leaves the size of the result set genuinely
             unknown.
+        pageable: False on the two entities that carry no top-level ``Id``.
+            They report ``total`` and ``has_more`` and never a cursor, because
+            ordering by Id is what makes an offset mean the same thing twice
+            and they have no Id to order by.
         has_more: True when rows exist past this page. It is False only where
             something proves the end: a page shorter than the limit, or an
             empty page past offset 0, which is QBO's answer to a STARTPOSITION
@@ -85,11 +89,29 @@ class PagedResult:
     offset: int = 0
     total: int | None = None
     has_more: bool = False
+    pageable: bool = True
 
     @property
     def next_offset(self) -> int | None:
-        """Offset to request for the following page, or None at the end."""
-        return self.offset + len(self.rows) if self.has_more else None
+        """Offset to request for the following page, or None if there is none.
+
+        None in two different situations, and they mean different things.
+        There is no next page (``has_more`` False), or this result set has no
+        cursor at all (``pageable`` False) — the two entities with no
+        top-level ``Id``, where ordering is unavailable so an offset cannot
+        mean the same thing on two requests.
+
+        The second case is why this is not simply ``has_more``. Those
+        endpoints can still say their answer was cut off, and they should; what
+        they must not do is hand back a cursor that does not work. Emitting
+        ``X-Next-Offset: 1000`` beside ``X-Has-More: true`` on an endpoint
+        whose service method takes no offset invites a caller to page into the
+        same thousand rows forever, which is worse than the silence it
+        replaced.
+        """
+        if not self.has_more or not self.pageable:
+            return None
+        return self.offset + len(self.rows)
 
 
 def apply_paging_headers(response: Response, page: PagedResult) -> None:
@@ -145,7 +167,11 @@ PAGING_RESPONSE_HEADERS: dict[str, dict[str, Any]] = {
     HEADER_NEXT_OFFSET: {
         "description": (
             "Value to send as `offset` for the next page. Absent on the last "
-            "page."
+            "page, and absent entirely on the endpoints that cannot page — "
+            "/api/recurring-transactions/ and /api/reference/exchange-rates, "
+            "whose rows carry no Id to order by. Those two still send "
+            "X-Total-Count and X-Has-More, so you can tell a truncated answer "
+            "from a whole one; you just cannot ask for the rest."
         ),
         "schema": {"type": "integer"},
     },

@@ -535,18 +535,31 @@ class QBOService:
         emits ` ORDER BY ` — and splitting on `clause` would put two query
         dialects into production, one per code path. `where("")` builds the
         same SELECT `all()` would, minus one special case: `all()` asks for
-        `SELECT *, Sku` when the entity is Item, because QBO leaves Sku out of
-        `*`. So paging Item means carrying that column onto the clause path
-        first, or every item comes back without its SKU and the response still
-        looks well formed. Stated as the rule rather than as a list of which
-        entities are currently safe — that list went stale twice in two PRs,
-        and a checklist nobody updates is worse than no checklist.
+        `SELECT *, Sku` when the entity is Item.
 
-        Two conditions an entity has to meet before it belongs here: it is not
-        Item (above), and it has a top-level `Id` to order by. Ordering is what
-        makes an offset mean the same thing on two different requests, so an
-        entity without an `Id` cannot be paged at all — see
-        `get_recurring_transactions`, which is why that one is still unpaged.
+        This docstring used to say Item therefore could not be paged, on the
+        premise that "QBO leaves Sku out of `*`". That premise is wrong, and it
+        was measured rather than argued. The deployed service already reaches
+        QuickBooks through `where()` for `/api/items/?active_only=true` (via
+        `ListMixin.filter`) and through `all()` for `active_only=false`, so
+        production answers the question directly. On 2026-09-18, FOR-138:
+
+            where() path   19 rows, 12 carrying a non-empty Sku
+            all()   path   19 rows, 12 carrying a non-empty Sku
+            rows where the two paths disagree on Sku:  0
+
+        `SELECT *` returns Sku for Item. The SDK's extra column is belt and
+        braces. The limit of that measurement, stated so nobody re-derives it:
+        FOR-138 is the only connected company with any Sku set — FOR-336,
+        AUT-691 and FOR-971 hold 14, 2 and 3 items with none between them — so
+        it is one company's evidence, and it is the only company that can
+        produce evidence at all.
+
+        One condition an entity has to meet before it belongs here: a top-level
+        `Id` to order by. Ordering is what makes an offset mean the same thing
+        on two different requests, so an entity without an `Id` cannot be paged
+        — see `_fetch_whole_with_signal`, which is how the two such entities
+        report completeness without a cursor.
         """
 
         def _fetch():
@@ -610,6 +623,43 @@ class QBOService:
                 exc_info=True,
             )
             return None
+
+    async def _fetch_whole_with_signal(
+        self, entity, *, client, op: str, limit: int
+    ) -> PagedResult:
+        """Fetch an entity that cannot be paged, and say whether it was whole.
+
+        For the two entities with no top-level `Id`, ordering by Id is not
+        available, so an offset cannot mean the same thing on two requests and
+        the endpoint has no cursor to offer. What it CAN offer is the fact a
+        caller actually needs: whether the rows it just received are all of
+        them. That is #20's remedy, applied to both of them.
+
+        `has_more` is False only on proof. A short page is proof — QBO had
+        fewer rows than we asked for. A full page is not, so the COUNT decides,
+        and an unanswered COUNT (`total` None) leaves `has_more` True: size
+        unknown, may continue. `next_offset` stays None throughout because
+        `has_more` is the only paging fact these two can honestly report.
+        """
+        def _fetch():
+            return entity.all(max_results=limit, qb=client)
+
+        items = await self._to_thread_with_retry(_fetch, op=op)
+        rows = [i.to_dict() for i in items]
+
+        if len(rows) < limit:
+            return PagedResult(
+                rows=rows, offset=0, total=len(rows), has_more=False, pageable=False
+            )
+
+        total = await self._count_matching(entity, client=client, clause=None, op=op)
+        return PagedResult(
+            rows=rows,
+            offset=0,
+            total=total,
+            has_more=total is None or total > len(rows),
+            pageable=False,
+        )
 
     async def _fetch_page(
         self,
@@ -768,19 +818,23 @@ class QBOService:
         return invoice.to_dict() if invoice else None
 
     async def get_customers(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
-        """Get customers."""
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the customer list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return Customer.filter(Active=True, max_results=max_results, qb=client)
-            return Customer.all(max_results=max_results, qb=client)
-
-        customers = await self._to_thread_with_retry(_fetch, op="get_customers")
-        return [c.to_dict() for c in customers]
+        return await self._fetch_page(
+            Customer,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_customers",
+        )
 
     async def get_customer_by_id(
         self, company_id: int, customer_id: int
@@ -2305,18 +2359,23 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_items(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the item (product/service) list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return Item.filter(Active=True, max_results=max_results, qb=client)
-            return Item.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_items")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            Item,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_items",
+        )
 
     async def get_item_by_id(
         self, company_id: int, entity_id: int
@@ -2335,18 +2394,23 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_employees(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the employee list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return Employee.filter(Active=True, max_results=max_results, qb=client)
-            return Employee.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_employees")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            Employee,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_employees",
+        )
 
     async def get_employee_by_id(
         self, company_id: int, entity_id: int
@@ -2365,18 +2429,23 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_departments(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the department list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return Department.filter(Active=True, max_results=max_results, qb=client)
-            return Department.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_departments")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            Department,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_departments",
+        )
 
     async def get_department_by_id(
         self, company_id: int, entity_id: int
@@ -2462,16 +2531,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_tax_agencies(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the tax-agency list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return TaxAgency.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_tax_agencies")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            TaxAgency,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_tax_agencies",
+        )
 
     async def get_tax_agency_by_id(
         self, company_id: int, entity_id: int
@@ -2490,16 +2565,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_tax_codes(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the tax-code list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return TaxCode.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_tax_codes")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            TaxCode,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_tax_codes",
+        )
 
     async def get_tax_code_by_id(
         self, company_id: int, entity_id: int
@@ -2518,16 +2599,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_tax_rates(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the tax-rate list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return TaxRate.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_tax_rates")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            TaxRate,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_tax_rates",
+        )
 
     async def get_tax_rate_by_id(
         self, company_id: int, entity_id: int
@@ -2546,16 +2633,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_company_currencies(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the company-currency list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return CompanyCurrency.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_company_currencies")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            CompanyCurrency,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_company_currencies",
+        )
 
     async def get_company_currency_by_id(
         self, company_id: int, entity_id: int
@@ -2574,34 +2667,45 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_exchange_rates(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self, company_id: int, max_results: int = QBO_MAX_PAGE_SIZE
+    ) -> PagedResult:
+        """Get exchange rates — whole, with a completeness signal, no cursor.
+
+        ExchangeRate is keyed by `AsOfDate` and the currency pair and carries
+        no top-level `Id`, so there is nothing stable to order by and an offset
+        would hand back duplicates forever. It gets `X-Total-Count` and
+        `X-Has-More` and no `X-Next-Offset`: the caller is told whether it has
+        everything, which is the fact that was missing, and is not handed a
+        cursor that cannot work.
+        """
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return ExchangeRate.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_exchange_rates")
-        return [i.to_dict() for i in items]
+        return await self._fetch_whole_with_signal(
+            ExchangeRate, client=client, op="get_exchange_rates", limit=max_results
+        )
 
     # -------------------------------------------------------------------------
     # PaymentMethod
     # -------------------------------------------------------------------------
 
     async def get_payment_methods(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the payment-method list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return PaymentMethod.filter(Active=True, max_results=max_results, qb=client)
-            return PaymentMethod.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_payment_methods")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            PaymentMethod,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_payment_methods",
+        )
 
     async def get_payment_method_by_id(
         self, company_id: int, entity_id: int
@@ -2620,18 +2724,23 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_terms(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the terms list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return Term.filter(Active=True, max_results=max_results, qb=client)
-            return Term.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_terms")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            Term,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_terms",
+        )
 
     async def get_term_by_id(
         self, company_id: int, entity_id: int
@@ -2650,18 +2759,23 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_classes(
-        self, company_id: int, active_only: bool = True, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        active_only: bool = True,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the tracking-class list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            if active_only:
-                return TrackingClass.filter(Active=True, max_results=max_results, qb=client)
-            return TrackingClass.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_classes")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            TrackingClass,
+            client=client,
+            clause=_active_clause(active_only),
+            offset=offset,
+            limit=max_results,
+            op="get_classes",
+        )
 
     async def get_class_by_id(
         self, company_id: int, entity_id: int
@@ -2680,16 +2794,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_customer_types(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the customer-type list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return CustomerType.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_customer_types")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            CustomerType,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_customer_types",
+        )
 
     async def get_customer_type_by_id(
         self, company_id: int, entity_id: int
@@ -2708,16 +2828,22 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_attachables(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
+        self,
+        company_id: int,
+        max_results: int = QBO_MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PagedResult:
+        """Get one page of the attachment list."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Attachable.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_attachables")
-        return [i.to_dict() for i in items]
+        return await self._fetch_page(
+            Attachable,
+            client=client,
+            clause=None,
+            offset=offset,
+            limit=max_results,
+            op="get_attachables",
+        )
 
     async def get_attachable_by_id(
         self, company_id: int, entity_id: int
@@ -2736,38 +2862,36 @@ class QBOService:
     # -------------------------------------------------------------------------
 
     async def get_recurring_transactions(
-        self, company_id: int, max_results: int = 1000
-    ) -> list[dict[str, Any]]:
-        """Get recurring transactions. Deliberately NOT paged — see below.
+        self, company_id: int, max_results: int = QBO_MAX_PAGE_SIZE
+    ) -> PagedResult:
+        """Get recurring transactions — whole, with a signal, no cursor (#20).
 
-        This is the one entity in the group #12 covers that cannot go through
-        `_fetch_page`. RecurringTransaction is a wrapper, not a row: the SDK
-        class carries no `Id` field, only a `class_dict` mapping a wrapped
-        type name to a Recurring<Type>, and live rows come back shaped
-        `{"JournalEntry": {...}}` with no top-level Id at all.
+        RecurringTransaction is a wrapper, not a row: the SDK class carries no
+        `Id`, only a `class_dict` mapping a wrapped type name to a
+        Recurring<Type>, and live rows come back shaped `{"JournalEntry": ...}`
+        with no top-level Id at all.
 
         `_query_page` orders every page by `Id`, which is what makes an offset
         mean the same thing twice. Sending `ORDERBY Id` against an entity that
-        has no Id gets one of two answers, and both are worse than not paging:
+        has no Id gets one of two answers and both are worse than not paging:
         QBO faults, turning a working 200 into a catch-all 500, or it ignores
         the clause, in which case `offset` silently does nothing while
         X-Has-More and X-Next-Offset tell the caller to keep going and it
         assembles the same rows over and over.
 
-        Not paging costs nothing here. These are scheduling templates, not a
-        ledger: measured against production on 2026-08-17 the four connected
-        companies hold 14, 0, 0 and 0 of them. The 1000-row ceiling that #12
-        is about is not reachable here, so the truncation this endpoint could
-        suffer is theoretical while the paging breakage would be immediate.
+        So it still does not page, and it now says so honestly rather than by
+        omission — which is the whole of #20. Measured against production on
+        2026-08-17 the four connected companies hold 14, 0, 0 and 0 of these,
+        so the 1000-row ceiling is not near; the signal is what was missing.
         """
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return RecurringTransaction.all(max_results=max_results, qb=client)
-
-        items = await self._to_thread_with_retry(_fetch, op="get_recurring_transactions")
-        return [i.to_dict() for i in items]
+        return await self._fetch_whole_with_signal(
+            RecurringTransaction,
+            client=client,
+            op="get_recurring_transactions",
+            limit=max_results,
+        )
 
     async def get_recurring_transaction_by_id(
         self, company_id: int, entity_id: int

@@ -32,18 +32,26 @@ from quickbooks.mixins import ListMixin
 from app.dependencies.api_auth import verify_api_key
 from app.routers import (
     accounts,
+    attachments,
     bill_payments,
     bills,
     credit_memos,
+    customers,
+    departments,
+    employees,
     deposits,
     estimates,
+    items,
     invoices,
     journal_entries,
     payments,
     purchase_orders,
     purchases,
+    reference,
+    recurring,
     refund_receipts,
     sales_receipts,
+    tax,
     time_activities,
     transfers,
     vendor_credits,
@@ -153,10 +161,31 @@ LIST_METHODS = [
     ("Estimate", "get_estimates"),
     ("Transfer", "get_transfers"),
     ("TimeActivity", "get_time_activities"),
-    # RecurringTransaction is NOT here, and must not be added. It is a wrapper
-    # with no top-level Id, so it cannot be ordered by the key that makes an
-    # offset stable. See test_recurring_transaction_has_no_id_to_order_by and
-    # the docstring on QBOService.get_recurring_transactions.
+    # The reference and master-data group. These were the last unpaged list
+    # endpoints in the service, and they are here for the same reason the
+    # transaction endpoints are: not because any of them is near the 1000-row
+    # ceiling today, but because a contract where a consumer has to know WHICH
+    # endpoints page is worse than either uniform state. /api/attachments/ was
+    # not hypothetical — measured against production it returned exactly 1000
+    # rows with nothing saying it was cut off.
+    ("Customer", "get_customers"),
+    ("Item", "get_items"),
+    ("Employee", "get_employees"),
+    ("Department", "get_departments"),
+    ("Attachable", "get_attachables"),
+    ("TaxAgency", "get_tax_agencies"),
+    ("TaxCode", "get_tax_codes"),
+    ("TaxRate", "get_tax_rates"),
+    ("CompanyCurrency", "get_company_currencies"),
+    ("PaymentMethod", "get_payment_methods"),
+    ("Term", "get_terms"),
+    ("TrackingClass", "get_classes"),
+    ("CustomerType", "get_customer_types"),
+    # RecurringTransaction and ExchangeRate are NOT here and must not be
+    # added. Neither carries a top-level Id, so neither can be ordered by the
+    # key that makes an offset stable. They are the two exceptions the
+    # registry guard below names, and they report completeness without a
+    # cursor — see the signal-only section at the end of this file.
 ]
 LIST_IDS = [method for _, method in LIST_METHODS]
 
@@ -176,7 +205,17 @@ TXN_LIST_METHODS = [
 TXN_LIST_IDS = [method for _, method in TXN_LIST_METHODS]
 
 # The subset whose default read is filtered rather than unfiltered.
-ACTIVE_LIST_METHODS = [("Vendor", "get_vendors"), ("Account", "get_accounts")]
+ACTIVE_LIST_METHODS = [
+    ("Vendor", "get_vendors"),
+    ("Account", "get_accounts"),
+    ("Customer", "get_customers"),
+    ("Item", "get_items"),
+    ("Employee", "get_employees"),
+    ("Department", "get_departments"),
+    ("PaymentMethod", "get_payment_methods"),
+    ("Term", "get_terms"),
+    ("TrackingClass", "get_classes"),
+]
 ACTIVE_LIST_IDS = [method for _, method in ACTIVE_LIST_METHODS]
 
 
@@ -203,6 +242,30 @@ def test_offset_reaches_quickbooks_as_a_one_based_startposition(
     assert entity.queries[0]["max_results"] == PAGE
     assert [r["Id"] for r in page.rows[:2]] == ["1000", "1001"]
     assert page.offset == 1000
+
+
+@pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
+def test_every_paged_query_orders_by_id(monkeypatch, attr, method):
+    """The premise of the whole mechanism, and nothing asserted it until now.
+
+    An offset only means the same thing on two requests if the rows come back
+    in the same order both times. QuickBooks does not promise an order for an
+    unordered query — measured against production, `/api/items/`,
+    `/api/customers/`, `/api/tax/codes` and `/api/reference/terms` all answer
+    in something other than Id order — so without an explicit ORDERBY a caller
+    walking offsets can see a row twice and never see another at all.
+
+    This is also the behaviour change the thirteen converted endpoints carry:
+    they used to reach QuickBooks through `filter()` / `all()` with
+    `order_by=""`, which emits no ORDERBY, and they now order by Id like the
+    seventeen that were already paged.
+    """
+    entity = _FakeEntity(ledger_size=2500)
+    svc = _service(monkeypatch, attr, entity)
+
+    asyncio.run(getattr(svc, method)(company_id=1, offset=500))
+
+    assert entity.queries[0]["order_by"] == "Id", entity.queries[0]
 
 
 @pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
@@ -586,10 +649,29 @@ ENDPOINTS = [
     (estimates, "/estimates/"),
     (transfers, "/transfers/"),
     (time_activities, "/time-activities/"),
-    # /recurring-transactions/ is NOT here — it is not paged. See
-    # test_the_unpageable_endpoints_advertise_no_cursor.
+    # The reference and master-data group, converted alongside the rest. These
+    # are here for the same reason they are in LIST_METHODS: the contract is
+    # that a caller never has to know which endpoints page. Without them at
+    # this level, deleting `apply_paging_headers` from one of these routers
+    # left the whole suite green — the service-level tests never see a header.
+    (customers, "/customers/"),
+    (items, "/items/"),
+    (employees, "/employees/"),
+    (departments, "/departments/"),
+    (attachments, "/attachments/"),
+    (tax, "/tax/agencies"),
+    (tax, "/tax/codes"),
+    (tax, "/tax/rates"),
+    (reference, "/reference/currencies"),
+    (reference, "/reference/payment-methods"),
+    (reference, "/reference/terms"),
+    (reference, "/reference/classes"),
+    (reference, "/reference/customer-types"),
+    # /recurring-transactions/ and /reference/exchange-rates are NOT here —
+    # they take no offset. They have their own endpoint-level test below,
+    # because they do still send X-Total-Count and X-Has-More.
 ]
-ENDPOINT_IDS = [path.strip("/") for _, path in ENDPOINTS]
+ENDPOINT_IDS = [path.strip("/").replace("/", "-") for _, path in ENDPOINTS]
 
 
 @pytest.mark.parametrize("module,path", ENDPOINTS, ids=ENDPOINT_IDS)
@@ -1040,3 +1122,301 @@ def test_the_unfiltered_total_counts_the_whole_file(monkeypatch, attr, method):
     asyncio.run(getattr(svc, method)(company_id=1, active_only=False))
 
     assert entity.count_calls == [""]
+
+
+# ---------------------------------------------------------------------------
+# The registry guard — what stops endpoint number 34 shipping unpaged
+# ---------------------------------------------------------------------------
+#
+# Every test above is parametrized over a list a human maintains. Adding a new
+# list endpoint and forgetting to add it to that list costs nothing and goes
+# green, which is exactly how the service arrived at seventeen paged endpoints
+# and fifteen unpaged ones without a single test objecting.
+#
+# This one reads the ROUTER TABLE instead. It cannot be satisfied by leaving a
+# fixture alone, because it asks the application what it actually serves.
+
+# The list routes that legitimately take no `offset`. There are two kinds and
+# they are kept apart, because they owe the caller different things.
+
+# No top-level Id, so there is nothing stable to ORDER BY and an offset would
+# hand back duplicates forever. These DO owe a completeness signal and send
+# one: X-Total-Count and X-Has-More, and never X-Next-Offset.
+SIGNAL_ONLY_ROUTES = {
+    "/api/recurring-transactions/",
+    "/api/reference/exchange-rates",
+}
+
+# Not a file listing at all. It returns exactly the payments the bill's own
+# LinkedTxn names, so the result set is bounded by the bill rather than by the
+# ledger, and an id that fails to resolve raises instead of returning a
+# subset. It cannot silently truncate, so it has no completeness signal to
+# give and must not imply one by sending paging headers.
+BOUNDED_ROUTES = {"/api/bill-payments/by-bill/{bill_id}"}
+
+# A new entry in either set needs an argument, not a line.
+PAGING_EXEMPT = SIGNAL_ONLY_ROUTES | BOUNDED_ROUTES
+
+
+def _api_list_routes():
+    """Every GET under /api/ whose response body is a JSON array."""
+    import typing
+
+    from app.main import app
+
+    routes = []
+    for route in app.routes:
+        if not hasattr(route, "methods") or "GET" not in route.methods:
+            continue
+        if not route.path.startswith("/api/"):
+            continue
+        if typing.get_origin(getattr(route, "response_model", None)) is not list:
+            continue
+        routes.append(route)
+    return routes
+
+
+def test_every_list_endpoint_either_pages_or_is_a_named_exception():
+    """The contract: a caller never has to know WHICH endpoints page.
+
+    Seventeen paged and fifteen unpaged was the state this replaced, and the
+    cost of it was not any single truncated endpoint — it was that a consumer
+    had to hold a table in their head to know whether a 200 was the whole
+    answer. Adding an endpoint without an `offset` now fails here.
+    """
+    routes = _api_list_routes()
+    assert len(routes) >= 30, f"only found {len(routes)} list routes — check the filter"
+
+    unpaged = {
+        route.path
+        for route in routes
+        if "offset" not in {p.name for p in route.dependant.query_params}
+    }
+
+    assert unpaged == PAGING_EXEMPT, (
+        f"list routes with no offset: {sorted(unpaged)}\n"
+        f"expected exactly: {sorted(PAGING_EXEMPT)}\n"
+        "A new unpaged list endpoint needs an argument for why it cannot page, "
+        "added to PAGING_EXEMPT with that argument written down."
+    )
+
+
+def test_every_exempt_route_still_exists():
+    """An exemption for a route that is gone silently widens the guard.
+
+    Deleting `/api/reference/exchange-rates` while leaving it in the set would
+    leave the guard passing over a route that no longer exists, and the next
+    unpaged endpoint to arrive would have one free slot to land in.
+    """
+    served = {route.path for route in _api_list_routes()}
+    stale = PAGING_EXEMPT - served
+    assert not stale, f"PAGING_EXEMPT names routes the app does not serve: {sorted(stale)}"
+
+
+def test_every_paged_list_endpoint_declares_its_headers_in_the_schema():
+    """A header a caller cannot discover is a header they will not read.
+
+    Covers the signal-only routes too — they send X-Has-More and owe the
+    caller a way to discover it. BOUNDED_ROUTES is skipped: it sends no paging
+    headers because it has no completeness signal to give, and declaring
+    headers it never sends would be a worse lie than declaring none.
+
+    `responses={200: {"headers": PAGING_RESPONSE_HEADERS}}` is what puts
+    X-Total-Count / X-Has-More / X-Next-Offset into the OpenAPI document. It
+    is easy to omit — the endpoint works without it — and omitting it leaves
+    the paging facts invisible to anyone reading the schema, which for this
+    service is how consumers find out what exists.
+    """
+    from app.main import app
+
+    schema = app.openapi()
+    missing = []
+    for route in _api_list_routes():
+        if route.path in BOUNDED_ROUTES:
+            continue
+        declared = (
+            schema["paths"]
+            .get(route.path, {})
+            .get("get", {})
+            .get("responses", {})
+            .get("200", {})
+            .get("headers", {})
+        )
+        if "X-Has-More" not in declared:
+            missing.append(route.path)
+
+    assert not missing, f"paging headers absent from the OpenAPI schema for: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# The two that report completeness without a cursor
+# ---------------------------------------------------------------------------
+
+
+class _UnorderedEntity:
+    """An entity fetched through ListMixin.all() — no offset, no ordering."""
+
+    def __init__(self, ledger_size: int, count_answer="same"):
+        self.ledger_size = ledger_size
+        self.count_answer = count_answer
+        self.all_calls: list[dict] = []
+        self.count_calls: list[str] = []
+
+    def all(self, order_by="", start_position="", max_results="", qb=None):
+        self.all_calls.append(
+            {"start_position": start_position, "max_results": max_results}
+        )
+        limit = min(int(max_results or PAGE), PAGE)
+        return [_Row(i) for i in range(min(limit, self.ledger_size))]
+
+    def where(self, *a, **k):
+        raise AssertionError("an entity with no Id must not be queried with ORDERBY Id")
+
+    def count(self, where_clause="", qb=None):
+        self.count_calls.append(where_clause)
+        return None if self.count_answer is None else self.ledger_size
+
+
+SIGNAL_ONLY = [
+    ("ExchangeRate", "get_exchange_rates"),
+    ("RecurringTransaction", "get_recurring_transactions"),
+]
+SIGNAL_ONLY_IDS = [m for _, m in SIGNAL_ONLY]
+
+
+@pytest.mark.parametrize("attr,method", SIGNAL_ONLY, ids=SIGNAL_ONLY_IDS)
+def test_a_truncated_unpageable_answer_says_it_is_truncated(monkeypatch, attr, method):
+    """The #20 remedy: no cursor, but the caller learns the answer is partial.
+
+    This is the whole value of the change for these two. Before it, a full
+    1000-row answer and a complete 1000-row answer were the same response.
+    """
+    entity = _UnorderedEntity(ledger_size=4200)
+    svc = _service(monkeypatch, attr, entity)
+
+    page = asyncio.run(getattr(svc, method)(company_id=1))
+
+    assert len(page.rows) == PAGE
+    assert page.total == 4200
+    assert page.has_more is True
+    assert page.next_offset is None, "there is no cursor to offer and none must be offered"
+
+
+@pytest.mark.parametrize("attr,method", SIGNAL_ONLY, ids=SIGNAL_ONLY_IDS)
+def test_a_short_unpageable_answer_is_reported_complete_without_a_count(
+    monkeypatch, attr, method
+):
+    """A short read is its own proof, so it costs no COUNT round trip."""
+    entity = _UnorderedEntity(ledger_size=14)
+    svc = _service(monkeypatch, attr, entity)
+
+    page = asyncio.run(getattr(svc, method)(company_id=1))
+
+    assert len(page.rows) == 14
+    assert page.total == 14
+    assert page.has_more is False
+    assert entity.count_calls == []
+
+
+@pytest.mark.parametrize("attr,method", SIGNAL_ONLY, ids=SIGNAL_ONLY_IDS)
+def test_an_unanswered_count_leaves_the_answer_open_not_complete(
+    monkeypatch, attr, method
+):
+    """QBO declining to COUNT must not be read as "that was all of them".
+
+    A full page with an unknown total is the one case where the safe reading
+    and the convenient reading differ, and getting it backwards is how a
+    partial answer gets treated as whole.
+    """
+    entity = _UnorderedEntity(ledger_size=PAGE, count_answer=None)
+    svc = _service(monkeypatch, attr, entity)
+
+    page = asyncio.run(getattr(svc, method)(company_id=1))
+
+    assert page.total is None
+    assert page.has_more is True
+
+
+@pytest.mark.parametrize("attr,method", SIGNAL_ONLY, ids=SIGNAL_ONLY_IDS)
+def test_an_unpageable_entity_is_never_ordered_by_id(monkeypatch, attr, method):
+    """The reason these two cannot page, asserted rather than commented.
+
+    `_fetch_page` orders every query by Id. Routing either of these through it
+    sends ORDERBY Id against an entity that has none, and QBO either faults —
+    turning a working 200 into a 500 — or ignores the clause, in which case an
+    offset silently does nothing while the headers invite the caller to keep
+    paging into the same rows. `_UnorderedEntity.where` raises, so a future
+    change that "just adds paging here too" fails here instead of in
+    production.
+    """
+    entity = _UnorderedEntity(ledger_size=10)
+    svc = _service(monkeypatch, attr, entity)
+
+    asyncio.run(getattr(svc, method)(company_id=1))
+
+    assert entity.all_calls, "the unpageable reads go through ListMixin.all()"
+    assert all(c["start_position"] in ("", None) for c in entity.all_calls)
+
+
+SIGNAL_ONLY_ENDPOINTS = [
+    (recurring, "/recurring-transactions/"),
+    (reference, "/reference/exchange-rates"),
+]
+SIGNAL_ONLY_ENDPOINT_IDS = [p.strip("/").replace("/", "-") for _, p in SIGNAL_ONLY_ENDPOINTS]
+
+
+@pytest.mark.parametrize(
+    "module,path", SIGNAL_ONLY_ENDPOINTS, ids=SIGNAL_ONLY_ENDPOINT_IDS
+)
+def test_the_cursorless_endpoints_still_say_whether_the_answer_is_whole(module, path):
+    """No cursor is not the same as no signal, and that is the whole of #20.
+
+    These two cannot page. What they were doing before was worse than that:
+    returning a possibly-truncated array with nothing at all saying so, which
+    is the same failure the paged endpoints had and is fixable here even
+    though paging is not.
+    """
+    page = PagedResult(
+        rows=[{"Id": str(i)} for i in range(PAGE)],
+        offset=0,
+        total=4200,
+        has_more=True,
+        pageable=False,
+    )
+    client, _ = _client(module, page)
+
+    res = client.get(path, params={"company_id": 1})
+
+    assert res.status_code == 200
+    assert res.headers["X-Has-More"] == "true"
+    assert res.headers["X-Total-Count"] == "4200"
+    assert isinstance(res.json(), list)
+
+
+@pytest.mark.parametrize(
+    "module,path", SIGNAL_ONLY_ENDPOINTS, ids=SIGNAL_ONLY_ENDPOINT_IDS
+)
+def test_the_cursorless_endpoints_offer_no_cursor(module, path):
+    """A cursor that does not work is worse than no cursor.
+
+    `offset` is not a parameter these accept, so emitting X-Next-Offset beside
+    X-Has-More: true would send a caller round the same thousand rows
+    indefinitely, each request looking like progress.
+    """
+    page = PagedResult(
+        rows=[{"Id": str(i)} for i in range(PAGE)],
+        offset=0,
+        total=4200,
+        has_more=True,
+        pageable=False,
+    )
+    client, _ = _client(module, page)
+
+    res = client.get(path, params={"company_id": 1})
+
+    assert "X-Next-Offset" not in res.headers
+    assert res.status_code == 200
+
+    rejected = client.get(path, params={"company_id": 1, "offset": 1000})
+    assert rejected.status_code == 200, "an unknown query param is ignored, not an error"
+    assert "X-Next-Offset" not in rejected.headers
