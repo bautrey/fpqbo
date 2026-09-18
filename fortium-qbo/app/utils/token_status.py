@@ -76,7 +76,7 @@ def _lifetime(raw, fallback: timedelta, label: str) -> timedelta:
 def apply_token_expiries(target, auth_client) -> None:
     """Write both expiries onto `target` from Intuit's own values.
 
-    Exists because `token_expiries` returns a PAIR, and five call sites each
+    Exists because `token_expiries` returns a PAIR, and four call sites each
     unpacked that pair and assigned the halves by position. Nothing caught a
     swap: mutating `qbo_callback` to
 
@@ -89,7 +89,7 @@ def apply_token_expiries(target, auth_client) -> None:
     Ordering cannot be got wrong here, because the caller never sees the two
     apart. One function, one place to be wrong, and it is covered end to end
     by the `_refresh_token` tests — which is the difference from testing each
-    of the five sites separately, and from the source guard, which sees a
+    of the four sites separately, and from the source guard, which sees a
     hardcoded constant and not a transposition.
 
     `target` is anything with the two attributes: a QboCompany row, or one
@@ -116,7 +116,7 @@ def token_expiries(auth_client) -> "TokenExpiries":
     `.get_bearer_token()` both values are sitting on the client and this reads
     them rather than assuming.
 
-    Before #34 the service wrote `+1 hour` and `+100 days` at five call sites.
+    Before #34 the service wrote `+1 hour` and `+100 days` at four call sites.
     Those are Intuit's documented defaults, so the stored expiry was usually
     right by coincidence; it stopped being right whenever Intuit issued a token
     with a different lifetime, and nothing in the service would have noticed.
