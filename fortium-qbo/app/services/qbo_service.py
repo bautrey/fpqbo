@@ -352,9 +352,6 @@ class QBOService:
             # Intuit states both lifetimes in the response `refresh()` just
             # received; `intuitlib.utils.send_request` copies every key of it
             # onto the client, so these are read rather than assumed (#34).
-            # Intuit states both lifetimes in the response `refresh()` just
-            # received; `intuitlib.utils.send_request` copies every key of it
-            # onto the client, so these are read rather than assumed (#34).
             apply_token_expiries(company, auth_client)
             company.last_refreshed_at = utcnow()
             company.token_status = "active"
