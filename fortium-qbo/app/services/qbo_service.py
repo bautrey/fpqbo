@@ -2204,6 +2204,69 @@ class QBOService:
         result = await asyncio.to_thread(_create)
         return result.to_dict()
 
+    async def delete_vendor_credit(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any]:
+        """Delete a VendorCredit in QBO.
+
+        A vendor credit could be created and read and never removed (#35),
+        which left a correction that wrote the wrong credits with no sanctioned
+        way back — the service exists so QuickBooks access does not happen by
+        hand, and a missing delete pushes it back into the UI.
+
+        **There is no void counterpart and there cannot be one.** The SDK's
+        `VoidMixin` covers Invoice, Payment, BillPayment, SalesReceipt and the
+        two recurring types; VendorCredit carries only `DeleteMixin`. So a
+        credit inside a closed period has no programmatic exit at all: QBO
+        refuses the delete, and the refusal text is the whole answer the caller
+        gets. That is why this passes QBO's response through rather than
+        summarising it.
+
+        Returns:
+            QBO's own delete response for the credit. Falls back to a synthetic
+            `{"Id", "status"}` only if QBO answers in a shape we do not
+            recognise, so the caller can still tell the delete happened.
+
+        Raises:
+            QboNotFound: no credit with that id in this company.
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return VendorCredit.get(entity_id, qb=client)
+
+        # Only the FETCH is inside the not-found mapping, matching
+        # void_bill_payment. A 610 raised by the delete itself is not "the
+        # credit was never there", and reporting it as a 404 would tell a
+        # caller that never retries a 404 that a delete which may have fired
+        # never did.
+        #
+        # ReadMixin.get() returns from_json(...) or raises; it never returns a
+        # falsy object. delete_bill's `if not bill:` guard is dead code for
+        # exactly that reason and is deliberately not copied here.
+        try:
+            existing = await asyncio.to_thread(_fetch)
+        except ObjectNotFoundException as exc:
+            raise QboNotFound(f"VendorCredit {entity_id} not found") from exc
+
+        def _delete():
+            return existing.delete(qb=client)
+
+        # asyncio.to_thread, NOT _to_thread_with_retry: a delete is not
+        # idempotent and that helper is documented READ-paths-only. DeleteMixin
+        # sends Id + SyncToken, so a retry after a first attempt that succeeded
+        # but whose response was lost comes back as a QBO refusal — which reads
+        # to the caller as "the delete failed" when it did not.
+        deleted = await asyncio.to_thread(_delete)
+
+        if isinstance(deleted, dict):
+            # QBO answers {"VendorCredit": {...}, "time": ...}. Hand back the
+            # entity when it is there, the whole body when it is not, so
+            # nothing QuickBooks said is discarded on the way out.
+            return deleted.get("VendorCredit") or deleted
+        return {"Id": str(entity_id), "status": "Deleted"}
+
     # -------------------------------------------------------------------------
     # Item
     # -------------------------------------------------------------------------

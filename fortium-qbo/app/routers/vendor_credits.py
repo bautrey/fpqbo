@@ -108,3 +108,34 @@ async def get_vendor_credit(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
+@router.delete("/{entity_id}", response_model=dict[str, Any])
+async def delete_vendor_credit(
+    entity_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Delete a vendor credit in QBO.
+
+    Mirrors `DELETE /api/bills/{bill_id}`, which existed while this did not —
+    so a credit could be created and read and never removed (#35).
+
+    **There is no void for this entity.** QuickBooks offers void for invoices,
+    payments, bill payments and sales receipts; a vendor credit can only be
+    deleted. A credit inside a closed period therefore cannot be neutralised
+    through this API at all — QuickBooks refuses, and the refusal text is the
+    answer. It arrives in the 500's `detail`, carrying QuickBooks' own error
+    code and message, because that is the part worth reading:
+
+        QBO API error: QB Validation Exception 6240: <message>
+        <detail>
+
+    Returns QuickBooks' own delete response rather than a summary of it.
+    404 when no credit with that id exists in this company.
+    """
+    return await run_qbo_write(
+        qbo.delete_vendor_credit(company_id, entity_id),
+        entity="vendor credit",
+        has_body=False,
+    )
