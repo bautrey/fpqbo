@@ -7,8 +7,9 @@
 
 This service is the sanctioned route to four live QuickBooks companies. Every
 row it returns is somebody's ledger, and every write it makes lands in books an
-accountant will reconcile. There is no staging QuickBooks: the sandbox company
-BUR-015 exists for write testing and the other four are real.
+accountant will reconcile. There is no staging QuickBooks. A sandbox company,
+BUR-015, is connected for write testing, though nothing can currently reach it
+through the API — see Article I.
 
 Most of what follows is about a single failure shape. This service almost never
 crashes. It answers 200 with something wrong, and the caller cannot tell.
@@ -17,18 +18,27 @@ crashes. It answers 200 with something wrong, and the caller cannot tell.
 
 ## Article I — Production QuickBooks is not a test environment
 
-FOR-138, FOR-971, FOR-336 and AUT-691 hold real books. Write operations get
-tested against the sandbox company BUR-015 first, and a write against a live
+FOR-138, FOR-971, FOR-336 and AUT-691 hold real books. A write against a live
 company happens because somebody asked for that specific write.
+
+**The sandbox-first half of this article is NOT YET TRUE OF THIS REPOSITORY,
+and it is written knowing that.** No API key resolves BUR-015 — the four keys
+in the keychain enumerate only the live companies — so a write cannot currently
+be exercised against the sandbox through `/api/*` at all. The one write
+endpoint shipped since, #36's vendor-credit delete, was verified against
+production FOR-138 with a nonexistent id and a read-only key rather than
+against the sandbox. Issuing a sandbox API key is the work that makes this
+article true; until then it states the intent and the gap.
 
 Reads against production are fine and are how most claims in this repository
 get settled — see Article VII. A read costs an API call against Intuit's quota
 and nothing else.
 
-**Not every mistake is recallable.** QuickBooks offers `void` for Invoice,
-Payment, BillPayment and SalesReceipt and for nothing else. A VendorCredit
-carries only `DeleteMixin`, so a credit deleted in error cannot be voided back
-into existence, and a credit inside a closed period cannot be removed at all
+**Not every mistake is recallable.** Six SDK classes carry `VoidMixin` —
+Invoice, Payment, BillPayment, SalesReceipt, RecurringInvoice and
+RecurringSalesReceipt — and nothing else does. A VendorCredit carries only
+`DeleteMixin`, so a credit deleted in error cannot be voided back into
+existence, and a credit inside a closed period cannot be removed at all
 (#35). Before adding any destructive endpoint, establish what the reverse
 operation is, and say plainly in the docstring when there is none.
 
@@ -38,19 +48,32 @@ operation is, and say plainly in the docstring when there is none.
 
 The default failure of this service is a 200 that looks whole and is not.
 
-`/api/attachments/` served exactly 1000 rows of 7,468 with nothing in the
-response saying so. A consumer's only available signal was "I got a suspiciously
-round number", which is wrong at every other boundary. That was seventeen
-endpoints paging and fifteen not, and it was fixed by making the contract
-uniform rather than by fixing the worst one (#42).
+`/api/attachments/` served exactly 1000 rows with nothing in the response
+saying so. A consumer's only available signal was "I got a suspiciously round
+number", which is wrong at every other boundary. That was seventeen endpoints
+paging and fifteen not, and it was fixed by making the contract uniform rather
+than by fixing the worst one (#42).
+
+The true total was unknowable until #42 shipped the header that reports it:
+7,468 measured immediately after, and it drifts as attachments are added —
+7,472 a few hours later. Quote it with the date or not at all.
 
 **Unknown is an honest answer. Invented completeness is not.** Where the size
 of a result set cannot be established, `X-Total-Count` is absent and
-`X-Has-More` is true — size unknown, may continue. Never the reverse.
+`X-Has-More` is true — size unknown, may continue.
 
-**And the evidence has to outrank the assertion.** Hours after #42 shipped,
-`/api/reference/exchange-rates` served 1000 rows carrying `X-Total-Count: 100`
-and `X-Has-More: false`, because QuickBooks answers `SELECT COUNT(*) FROM
+**One exception, and it is evidence rather than an escape.** An empty page past
+offset 0 proves no row exists at or beyond that offset, so `X-Has-More` is
+false there even when the COUNT went unanswered: a complete result set of
+unknown size. `_fetch_page`'s `overshot` branch is that case and
+`test_an_end_of_set_page_of_unknown_size_says_end_without_saying_size` pins it.
+Completeness always rests on something observed — a short page, or an empty one
+— never on the absence of contrary information.
+
+**And the evidence has to outrank the assertion.** Five minutes after #42
+merged, `/api/reference/exchange-rates` served 1000 rows carrying
+`X-Total-Count: 100` and `X-Has-More: false`, because QuickBooks answers
+`SELECT COUNT(*) FROM
 ExchangeRate` with 100 no matter how many rows the same query returns. A count
 below the rows already in hand contradicts data we are holding and is discarded
 (#44). Rows observed at `[offset, offset + row_count)` are a fact; a COUNT is a
@@ -106,9 +129,9 @@ An ablation that was never applied and a healthy guard look identical.
 **The ablations that came back GREEN are why this article exists**, and there
 have been four in one day:
 
-- Deleting `apply_paging_headers` from a converted router — the thirteen new
-  routers had no endpoint-level test at all, only service-level ones, which
-  never see a header (#44).
+- Deleting `apply_paging_headers` from a converted router — the thirteen newly
+  paged endpoints, spread across eight router files, had no endpoint-level test
+  at all, only service-level ones, which never see a header (#42).
 - Deleting `order_by=QBO_PAGE_ORDER_BY` from `_query_page` — nothing asserted
   the ORDERBY reached QuickBooks, and stable ordering is the entire premise of
   offset paging.
@@ -139,8 +162,14 @@ When an endpoint genuinely cannot offer what the others do, it says so rather
 than staying silent. `/api/recurring-transactions/` and
 `/api/reference/exchange-rates` carry no top-level `Id`, so ordering is
 unavailable and an offset would return duplicates forever; they report
-`X-Total-Count` and `X-Has-More` and no cursor (#20, #42). A cursor that does
-not work is worse than no cursor.
+`X-Has-More` and no cursor (#20, #42). A cursor that does not work is worse
+than no cursor.
+
+`/api/recurring-transactions/` reports `X-Total-Count` as well.
+`/api/reference/exchange-rates` does not, and that is the rule above working
+rather than an inconsistency: QuickBooks answers COUNT for that entity with 100
+however many rows it returns, so the number is discarded and the size is
+reported as unknown (#44).
 
 **An exception needs an argument, not a line.**
 `/api/bill-payments/by-bill/{id}` is exempt from paging because it returns
@@ -171,18 +200,31 @@ declare Item unpageable.
 company with any Sku set, so that check covers one company and is the only
 company capable of producing evidence. Say so rather than generalising.
 
-**Counts are claims too.** "Five call sites" appeared in four commit messages,
-three docstrings and a message to another session before anybody counted. There
-are four.
+**Counts are claims too.** "Five call sites" appeared in three commit
+messages, three docstrings and a message to another session before anybody
+counted. There are four. The count of the wrong counts was itself wrong in the
+first draft of this article, which is the joke and also the point.
 
 ---
 
 ## Article VIII — Tokens rotate, and a lost write costs a reconnect
 
-Intuit invalidates the old refresh token as part of issuing the new one. By the
-time anything in `_refresh_token` can fail, the old token is already dead — so
-an exception between the refresh and the commit does not degrade the expiry, it
-costs that company a manual reconnect through the admin UI.
+Intuit rotates the refresh token as part of issuing a new one. **Once
+`auth_client.refresh()` has returned**, an exception before the commit does not
+degrade the expiry — it can cost that company a reconnect, because the broad
+`except` below rolls the transaction back and the token that was stored may no
+longer be the live one.
+
+Not every failure in `_refresh_token` is that failure: the credentials check at
+the top raises before `refresh()` is ever called, with the stored token
+untouched. The dangerous window is specifically between the refresh returning
+and the commit landing.
+
+How often a rotation actually invalidates the previous value is not settled
+here — Intuit is documented as returning the same refresh token within a
+24-hour window, and the scheduler runs every 45 minutes, so the reconnect may
+be the exception rather than the rule. The window is treated as dangerous
+because the cost when it does bite is a human logging into the admin UI.
 
 Code on that path is written knowing the broad `except` below it rolls back.
 `int(float("inf"))` raises OverflowError and an int large enough to convert can
@@ -191,8 +233,9 @@ converted rather than allowed to escape (#43).
 
 **Read what Intuit sent.** Every token response states `expires_in` and
 `x_refresh_token_expires_in`, and `intuitlib` copies every key of it onto the
-client. Storing a documented default instead is right by coincidence until the
-day it is not, and nothing in the service would notice (#34).
+client bar `token_type` and `id_token`. Storing a documented default instead is
+right by coincidence until the day it is not, and nothing in the service would
+notice (#34).
 
 ---
 
@@ -205,7 +248,8 @@ next PR.
 **Deploy green is not verification.** The success signal of a shipped change is
 the user-visible reproduction returning the expected output, run within minutes
 of the merge. #44 exists because #42's own test plan was run against production
-and caught a defect #42 had shipped an hour earlier. Tests passing, CI green
+and caught a defect #42 had shipped five minutes earlier; the fix was merged
+fifteen minutes after the defect. Tests passing, CI green
 and a live deploy are preconditions; the repro is the evidence.
 
 **Report what happened.** If a check was skipped, say which. If a reviewer slot
