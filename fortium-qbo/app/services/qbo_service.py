@@ -535,18 +535,31 @@ class QBOService:
         emits ` ORDER BY ` — and splitting on `clause` would put two query
         dialects into production, one per code path. `where("")` builds the
         same SELECT `all()` would, minus one special case: `all()` asks for
-        `SELECT *, Sku` when the entity is Item, because QBO leaves Sku out of
-        `*`. So paging Item means carrying that column onto the clause path
-        first, or every item comes back without its SKU and the response still
-        looks well formed. Stated as the rule rather than as a list of which
-        entities are currently safe — that list went stale twice in two PRs,
-        and a checklist nobody updates is worse than no checklist.
+        `SELECT *, Sku` when the entity is Item.
 
-        Two conditions an entity has to meet before it belongs here: it is not
-        Item (above), and it has a top-level `Id` to order by. Ordering is what
-        makes an offset mean the same thing on two different requests, so an
-        entity without an `Id` cannot be paged at all — see
-        `get_recurring_transactions`, which is why that one is still unpaged.
+        This docstring used to say Item therefore could not be paged, on the
+        premise that "QBO leaves Sku out of `*`". That premise is wrong, and it
+        was measured rather than argued. The deployed service already reaches
+        QuickBooks through `where()` for `/api/items/?active_only=true` (via
+        `ListMixin.filter`) and through `all()` for `active_only=false`, so
+        production answers the question directly. On 2026-09-18, FOR-138:
+
+            where() path   19 rows, 12 carrying a non-empty Sku
+            all()   path   19 rows, 12 carrying a non-empty Sku
+            rows where the two paths disagree on Sku:  0
+
+        `SELECT *` returns Sku for Item. The SDK's extra column is belt and
+        braces. The limit of that measurement, stated so nobody re-derives it:
+        FOR-138 is the only connected company with any Sku set — FOR-336,
+        AUT-691 and FOR-971 hold 14, 2 and 3 items with none between them — so
+        it is one company's evidence, and it is the only company that can
+        produce evidence at all.
+
+        One condition an entity has to meet before it belongs here: a top-level
+        `Id` to order by. Ordering is what makes an offset mean the same thing
+        on two different requests, so an entity without an `Id` cannot be paged
+        — see `_fetch_whole_with_signal`, which is how the two such entities
+        report completeness without a cursor.
         """
 
         def _fetch():
