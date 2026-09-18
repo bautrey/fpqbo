@@ -1230,8 +1230,13 @@ def test_every_paged_list_endpoint_declares_its_headers_in_the_schema():
     from app.main import app
 
     schema = app.openapi()
+    routes = _api_list_routes()
+    # Without this the test is vacuous: its only assertion accumulates inside
+    # the loop, so route discovery returning [] leaves it green while its two
+    # siblings go red. Verified by forcing _api_list_routes() to return [].
+    assert len(routes) >= 30, f"only found {len(routes)} list routes — check the filter"
     missing = []
-    for route in _api_list_routes():
+    for route in routes:
         if route.path in BOUNDED_ROUTES:
             continue
         declared = (
@@ -1355,7 +1360,11 @@ def test_an_unpageable_entity_is_never_ordered_by_id(monkeypatch, attr, method):
     asyncio.run(getattr(svc, method)(company_id=1))
 
     assert entity.all_calls, "the unpageable reads go through ListMixin.all()"
-    assert all(c["start_position"] in ("", None) for c in entity.all_calls)
+    # Asserting `start_position == ""` here would be dead: the service never
+    # passes one, so the mock records the default whatever the code does. The
+    # live assertion is `_UnorderedEntity.where`, which raises — a future
+    # change that routes these through the paged path fails there.
+    assert entity.all_calls[0]["max_results"] == PAGE
 
 
 SIGNAL_ONLY_ENDPOINTS = [
@@ -1550,3 +1559,30 @@ def test_the_cursorless_endpoints_discard_an_impossible_count_too(
     assert page.total is None
     assert page.has_more is True
     assert page.next_offset is None, "still no cursor to offer"
+
+
+@pytest.mark.parametrize(
+    "module,path", SIGNAL_ONLY_ENDPOINTS, ids=SIGNAL_ONLY_ENDPOINT_IDS
+)
+def test_max_results_reaches_the_service_on_the_cursorless_endpoints(module, path):
+    """The only knob these two have, and nothing checked it arrived.
+
+    Found by deleting `max_results=max_results` from the service call in each
+    router: both deletions passed the whole suite. The router would declare the
+    parameter, validate it, and discard it, so a caller asking for 25 rows
+    would receive 1000 — and with no cursor on these endpoints there is no
+    second signal to notice it by.
+
+    The paged endpoints have `test_offset_is_declared_and_reaches_the_service`
+    for this. It was written for `offset`, which these two do not have, so they
+    fell through the gap between the two groups.
+    """
+    page = PagedResult(rows=[{"Id": "1"}], offset=0, total=1, has_more=False, pageable=False)
+    client, service = _client(module, page)
+
+    res = client.get(path, params={"company_id": 1, "max_results": 25})
+
+    assert res.status_code == 200
+    assert service.calls, "the router never called the service"
+    _, kwargs = service.calls[0]
+    assert kwargs["max_results"] == 25, f"router discarded max_results: {kwargs}"
