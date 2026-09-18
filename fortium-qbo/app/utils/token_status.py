@@ -1,8 +1,18 @@
 """Token status utility functions."""
 
+import logging
 from datetime import datetime, timedelta
 from app.utils.clock import as_utc, utcnow
 from typing import NamedTuple
+
+logger = logging.getLogger(__name__)
+
+# What to assume when Intuit does not tell us. These are Intuit's documented
+# defaults and were, until #34, the only values this service ever stored —
+# every token row's expiry was one of these two regardless of what the token
+# response said.
+FALLBACK_ACCESS_TOKEN_LIFETIME = timedelta(hours=1)
+FALLBACK_REFRESH_TOKEN_LIFETIME = timedelta(days=100)
 
 
 class TokenStatus(NamedTuple):
@@ -18,6 +28,132 @@ class RefreshTokenStatus(NamedTuple):
     refresh_status: str          # "healthy", "warning", "critical", "expired", "unknown"
     refresh_expires_display: str  # Human-readable expiration (e.g., "Expires in 99d")
     refresh_css_class: str       # Bootstrap badge class
+
+
+def _lifetime(raw, fallback: timedelta, label: str) -> timedelta:
+    """One lifetime from Intuit's response, or the fallback.
+
+    Falls back on anything that is not a positive whole number of seconds.
+    The guard matters in one direction more than the other: a zero or negative
+    value would store an expiry already in the past, and the scheduler treats a
+    past expiry as "refresh now", so one malformed response would turn into a
+    refresh on every scheduler tick against Intuit's rate limits. A value that
+    is merely wrong-but-positive is no worse than the constant it replaces.
+
+    `int()` rather than a type check because Intuit sends these as JSON numbers
+    and has been observed sending them as strings; both are the same fact.
+
+    OverflowError is caught alongside the conversion errors, and the timedelta
+    is built inside the same guard, because that is where the two remaining
+    escapes are: `int(float("inf"))` raises OverflowError, and an int large
+    enough to convert can still overflow `timedelta(seconds=...)`. Either one
+    escaping matters more here than it looks — `QBOService._refresh_token`
+    wraps the whole refresh in a broad `except` that rolls back, and Intuit has
+    ALREADY invalidated the old refresh token by then. So an unguarded
+    OverflowError costs that company a manual reconnect. Raised by
+    security-review on PR #43.
+    """
+    if raw is None:
+        return fallback
+    try:
+        seconds = int(raw)
+        candidate = timedelta(seconds=seconds)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning(
+            "Intuit sent a %s of %r, which is not a usable number of seconds; "
+            "falling back to %s", label, raw, fallback
+        )
+        return fallback
+    if seconds <= 0:
+        logger.warning(
+            "Intuit sent a %s of %d seconds; falling back to %s rather than "
+            "storing an expiry in the past", label, seconds, fallback
+        )
+        return fallback
+    return candidate
+
+
+def apply_token_expiries(target, auth_client) -> None:
+    """Write both expiries onto `target` from Intuit's own values.
+
+    Exists because `token_expiries` returns a PAIR, and four call sites each
+    unpacked that pair and assigned the halves by position. Nothing caught a
+    swap: mutating `qbo_callback` to
+
+        refresh_token_expires_at, token_expires_at = token_expiries(...)
+
+    passed all 1037 tests. That stores 100 days on the access token, so
+    `_needs_refresh` never fires and the company silently stops refreshing
+    until Intuit expires the grant outright.
+
+    Ordering cannot be got wrong here, because the caller never sees the two
+    apart. One function, one place to be wrong, and it is covered end to end
+    by the `_refresh_token` tests — which is the difference from testing each
+    of the four sites separately, and from the source guard, which sees a
+    hardcoded constant and not a transposition.
+
+    `target` is anything with the two attributes: a QboCompany row, or one
+    being built.
+    """
+    expiries = token_expiries(auth_client)
+    target.token_expires_at = expiries.access
+    target.refresh_token_expires_at = expiries.refresh
+
+
+class TokenExpiries(NamedTuple):
+    """The two expiries, named, so a positional mistake has to be spelled out."""
+
+    access: datetime
+    refresh: datetime
+
+
+def token_expiries(auth_client) -> "TokenExpiries":
+    """When the access and refresh tokens actually expire, per Intuit.
+
+    Every token response carries `expires_in` and `x_refresh_token_expires_in`,
+    and `intuitlib.utils.send_request` copies every key of that response onto
+    the `AuthClient` before returning — so after a successful `.refresh()` or
+    `.get_bearer_token()` both values are sitting on the client and this reads
+    them rather than assuming.
+
+    Before #34 the service wrote `+1 hour` and `+100 days` at four call sites.
+    Those are Intuit's documented defaults, so the stored expiry was usually
+    right by coincidence; it stopped being right whenever Intuit issued a token
+    with a different lifetime, and nothing in the service would have noticed.
+    The access-token expiry is what the scheduler refreshes against, so a
+    stored value longer than the real one means requests failing on an expired
+    token that the service believes is live.
+
+    Returns a `(token_expires_at, refresh_token_expires_at)` pair, both aware
+    UTC, measured from now.
+    """
+    now = utcnow()
+    access = _lifetime(
+        getattr(auth_client, "expires_in", None),
+        FALLBACK_ACCESS_TOKEN_LIFETIME,
+        "expires_in",
+    )
+    refresh = _lifetime(
+        getattr(auth_client, "x_refresh_token_expires_in", None),
+        FALLBACK_REFRESH_TOKEN_LIFETIME,
+        "x_refresh_token_expires_in",
+    )
+    try:
+        return TokenExpiries(now + access, now + refresh)
+    except OverflowError:
+        # Belt and braces for the addition itself. `_lifetime` already caps
+        # what it returns by constructing the timedelta inside its guard, so
+        # reaching here needs a fallback constant large enough to overflow
+        # datetime.max, which the two in this module are not. Guarded anyway
+        # because the cost of being wrong is the rotated refresh token.
+        logger.error(
+            "token expiry arithmetic overflowed; storing the documented "
+            "defaults instead"
+        )
+        return TokenExpiries(
+            now + FALLBACK_ACCESS_TOKEN_LIFETIME,
+            now + FALLBACK_REFRESH_TOKEN_LIFETIME,
+        )
 
 
 def get_token_status(

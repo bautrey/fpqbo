@@ -262,3 +262,404 @@ def test_the_scheduler_selects_the_same_companies_either_column_type(monkeypatch
     assert "NO-EXPIRY" not in refreshed, (
         "a NULL expiry must stay excluded, as the SQL `<=` did"
     )
+
+
+# ---------------------------------------------------------------------------
+# Expiries Intuit stated, rather than expiries we assumed (#34)
+# ---------------------------------------------------------------------------
+#
+# Five call sites wrote `utcnow() + timedelta(hours=1)` and
+# `utcnow() + timedelta(days=100)` while the token response that had just
+# arrived carried both real lifetimes. Those constants are Intuit's documented
+# defaults, so the stored value was usually right by coincidence — and nothing
+# here would have noticed the day it stopped being.
+#
+# The access-token expiry is what the scheduler refreshes against. Storing one
+# longer than the truth means requests failing on an expired token the service
+# believes is live, and the failure surfaces as a QuickBooks 401 rather than as
+# anything pointing at this.
+
+from app.utils.token_status import (
+    FALLBACK_ACCESS_TOKEN_LIFETIME,
+    FALLBACK_REFRESH_TOKEN_LIFETIME,
+    token_expiries,
+)
+
+
+class _AuthClient:
+    """An intuitlib AuthClient after a token call, as send_request leaves it.
+
+    `intuitlib.utils.send_request` does `set_attributes(obj, response.json())`
+    on any 200 with a body, and that copies EVERY key of the token response
+    onto the client — which is why these two attributes are readable at all.
+    """
+
+    def __init__(self, expires_in=3600, x_refresh_token_expires_in=8726400):
+        self.expires_in = expires_in
+        self.x_refresh_token_expires_in = x_refresh_token_expires_in
+
+
+def _minutes(delta):
+    return round(delta.total_seconds() / 60)
+
+
+def test_the_stored_expiry_tracks_what_intuit_said_not_the_constant():
+    """The test that fails against the code this replaces.
+
+    A 30-minute access token is the case the constants get wrong in the
+    dangerous direction: the old code stored 60 minutes, so for half an hour
+    the service believed a dead token was live.
+    """
+    before = utcnow()
+    access, refresh = token_expiries(_AuthClient(expires_in=1800))
+
+    assert 29 <= _minutes(access - before) <= 31, access
+    assert _minutes(access - before) != 60, "stored the constant, not Intuit's value"
+
+
+def test_a_longer_lived_token_is_not_truncated_to_the_constant():
+    """The other direction: an expiry shorter than the truth refreshes early.
+
+    Harmless for correctness and not free — every premature refresh spends an
+    Intuit rate-limit slot and rotates a refresh token that had not expired.
+    """
+    before = utcnow()
+    access, _ = token_expiries(_AuthClient(expires_in=7200))
+
+    assert 119 <= _minutes(access - before) <= 121
+
+
+def test_the_refresh_token_expiry_comes_from_intuit_too():
+    before = utcnow()
+    _, refresh = token_expiries(_AuthClient(x_refresh_token_expires_in=60 * 60 * 24 * 45))
+
+    assert 44 <= (refresh - before).days <= 45
+
+
+@pytest.mark.parametrize("value", ["3600", 3600])
+def test_a_string_of_seconds_is_the_same_fact_as_a_number(value):
+    """Intuit sends these as JSON numbers and has been seen sending strings.
+
+    A type check would have taken the fallback on the string and looked exactly
+    like the bug this replaces: a plausible expiry, silently not Intuit's.
+    """
+    before = utcnow()
+    access, _ = token_expiries(_AuthClient(expires_in=value))
+
+    assert 59 <= _minutes(access - before) <= 61
+
+
+@pytest.mark.parametrize(
+    "missing", [None], ids=["absent"]
+)
+def test_an_absent_value_falls_back_to_the_documented_default(missing):
+    before = utcnow()
+    access, refresh = token_expiries(
+        _AuthClient(expires_in=missing, x_refresh_token_expires_in=missing)
+    )
+
+    assert _minutes(access - before) == _minutes(FALLBACK_ACCESS_TOKEN_LIFETIME)
+    assert (refresh - before).days == FALLBACK_REFRESH_TOKEN_LIFETIME.days
+
+
+@pytest.mark.parametrize("bad", [0, -1, "", "soon", [], {}], ids=
+                         ["zero", "negative", "empty", "words", "list", "dict"])
+def test_a_value_that_would_store_a_past_expiry_is_refused(bad):
+    """The one guard that is not cosmetic.
+
+    A zero or negative lifetime stores an expiry already behind us, and the
+    scheduler reads a past expiry as "refresh now" — so one malformed response
+    becomes a refresh attempt on every scheduler tick, against Intuit's rate
+    limits, for as long as the response keeps coming back malformed.
+    """
+    before = utcnow()
+    access, _ = token_expiries(_AuthClient(expires_in=bad))
+
+    assert access > before, "stored an expiry in the past"
+    assert _minutes(access - before) == _minutes(FALLBACK_ACCESS_TOKEN_LIFETIME)
+
+
+def test_a_client_that_never_saw_a_token_response_still_answers():
+    """`getattr(..., None)` rather than attribute access.
+
+    An AuthClient built but never used has neither attribute set to anything
+    but None, and a refresh path that raised AttributeError here would turn a
+    token problem into a 500 inside the refresh handler.
+    """
+    class _Bare:
+        pass
+
+    before = utcnow()
+    access, refresh = token_expiries(_Bare())
+
+    assert _minutes(access - before) == _minutes(FALLBACK_ACCESS_TOKEN_LIFETIME)
+    assert (refresh - before).days == FALLBACK_REFRESH_TOKEN_LIFETIME.days
+
+
+def test_the_two_lifetimes_are_read_independently():
+    """A single shared value would make one of the two silently wrong.
+
+    They are different fields with different magnitudes — an hour against a
+    hundred days — so crossing them is the kind of mistake that still produces
+    plausible-looking rows.
+    """
+    before = utcnow()
+    access, refresh = token_expiries(
+        _AuthClient(expires_in=1800, x_refresh_token_expires_in=60 * 60 * 24 * 10)
+    )
+
+    assert 29 <= _minutes(access - before) <= 31
+    assert 9 <= (refresh - before).days <= 10
+
+
+# ---------------------------------------------------------------------------
+# The call sites, not just the helper
+# ---------------------------------------------------------------------------
+#
+# The tests above all call `token_expiries` directly. Every one of them passed
+# while `_refresh_token` still wrote `utcnow() + timedelta(hours=1)` — reverting
+# that single line left the whole suite green. A helper nothing calls is a
+# helper that fixes nothing, so these exercise the path that actually writes to
+# the database.
+
+
+class _StubAuthClient:
+    """Stands in for intuitlib's AuthClient inside `_refresh_token`.
+
+    `refresh()` is where the attributes appear in the real thing: send_request
+    copies the token response onto the client. This does the same, so a test
+    that read them before `refresh()` would see nothing, exactly as production
+    would.
+    """
+
+    instances: list = []
+
+    def __init__(self, **kwargs):
+        self.access_token = kwargs.get("access_token")
+        self.refresh_token = kwargs.get("refresh_token")
+        self.expires_in = None
+        self.x_refresh_token_expires_in = None
+        type(self).instances.append(self)
+
+    def refresh(self):
+        self.access_token = "new-access"
+        self.refresh_token = "new-refresh"
+        self.expires_in = 1800
+        self.x_refresh_token_expires_in = 60 * 60 * 24 * 30
+
+
+class _Db:
+    def __init__(self):
+        self.commits = 0
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+
+def _refreshable_company():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        code="FOR-138",
+        region="US",
+        is_sandbox=False,
+        access_token="old-access",
+        refresh_token="old-refresh",
+        token_expires_at=None,
+        refresh_token_expires_at=None,
+        last_refreshed_at=None,
+        token_status="active",
+    )
+
+
+def _run_refresh(monkeypatch):
+    """Drive QBOService._refresh_token with everything external stubbed."""
+    from app.services import qbo_service as mod
+
+    _StubAuthClient.instances = []
+    monkeypatch.setattr(mod, "AuthClient", _StubAuthClient)
+    # The whole settings object, not one attribute: Settings is a pydantic
+    # model and refuses setattr for a field it does not declare.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        mod,
+        "settings",
+        SimpleNamespace(
+            get_qbo_credentials=lambda region, is_sandbox=False: ("id", "secret"),
+            qbo_callback_url="https://example.invalid/callback",
+        ),
+    )
+
+    svc = mod.QBOService.__new__(mod.QBOService)
+    svc.db = _Db()
+    company = _refreshable_company()
+
+    before = utcnow()
+    svc._refresh_token(company)
+    return company, before
+
+
+def test_the_refresh_path_stores_intuits_access_expiry(monkeypatch):
+    """Reverting this call site to `+ timedelta(hours=1)` must turn this red.
+
+    It is the write that matters most: `_needs_refresh` compares against this
+    column, so a stored hour against a real half hour means thirty minutes of
+    the service believing a dead token is live.
+    """
+    company, before = _run_refresh(monkeypatch)
+
+    minutes = round((company.token_expires_at - before).total_seconds() / 60)
+    assert 29 <= minutes <= 31, f"stored {minutes} minutes, Intuit said 30"
+
+
+def test_the_refresh_path_stores_intuits_refresh_expiry(monkeypatch):
+    company, before = _run_refresh(monkeypatch)
+
+    days = (company.refresh_token_expires_at - before).days
+    assert 29 <= days <= 30, f"stored {days} days, Intuit said 30"
+
+
+def test_the_refresh_path_still_persists_the_rotated_tokens(monkeypatch):
+    """Intuit invalidates the old refresh token on every refresh.
+
+    Asserted alongside the expiries because this is the one code path where
+    losing the write costs a manual reconnect, and a change to the lines above
+    it must not disturb it.
+    """
+    company, _ = _run_refresh(monkeypatch)
+
+    assert company.access_token == "new-access"
+    assert company.refresh_token == "new-refresh"
+    assert company.token_status == "active"
+    assert company.last_refreshed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Values that escaped the guard, and the cost of escaping it
+# ---------------------------------------------------------------------------
+#
+# security-review on PR #43: `_lifetime` caught only (TypeError, ValueError),
+# and two shapes get past that. `int(float("inf"))` raises OverflowError, and
+# an int large enough to convert can still overflow `timedelta(seconds=...)`.
+#
+# Escaping matters more than the odds suggest. `QBOService._refresh_token`
+# wraps the whole refresh in a broad `except` that rolls back — and by the time
+# it runs, Intuit has ALREADY invalidated the old refresh token. So an
+# unguarded OverflowError does not degrade the expiry, it costs that company a
+# manual reconnect.
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [10**30, float("inf"), float("-inf"), float("nan"), 10**19],
+    ids=["huge-int", "inf", "-inf", "nan", "overflows-timedelta"],
+)
+def test_a_value_that_cannot_become_a_timedelta_falls_back_rather_than_raising(hostile):
+    before = utcnow()
+
+    access, refresh = token_expiries(_AuthClient(expires_in=hostile))
+
+    assert _minutes(access - before) == _minutes(FALLBACK_ACCESS_TOKEN_LIFETIME)
+    assert access > before
+
+
+def test_the_refresh_path_survives_a_hostile_expires_in(monkeypatch):
+    """The end that actually costs something.
+
+    Not a unit test of the guard — a test that `_refresh_token` completes and
+    commits the rotated tokens when Intuit sends a value that used to raise.
+    Before the fix this raised out of `token_expiries`, landed in the broad
+    except, rolled back, and left the company holding a refresh token Intuit
+    had already invalidated.
+    """
+    from app.services import qbo_service as mod
+    from types import SimpleNamespace
+
+    class _HostileAuthClient(_StubAuthClient):
+        def refresh(self):
+            super().refresh()
+            self.expires_in = float("inf")
+
+    _StubAuthClient.instances = []
+    monkeypatch.setattr(mod, "AuthClient", _HostileAuthClient)
+    monkeypatch.setattr(
+        mod,
+        "settings",
+        SimpleNamespace(
+            get_qbo_credentials=lambda region, is_sandbox=False: ("id", "secret"),
+            qbo_callback_url="https://example.invalid/callback",
+        ),
+    )
+
+    svc = mod.QBOService.__new__(mod.QBOService)
+    svc.db = _Db()
+    company = _refreshable_company()
+    before = utcnow()
+
+    svc._refresh_token(company)
+
+    assert company.refresh_token == "new-refresh", "the rotated token was lost"
+    assert company.token_status == "active"
+    assert svc.db.commits == 1, "the refresh rolled back"
+    assert company.token_expires_at > before
+
+
+# ---------------------------------------------------------------------------
+# All five call sites, not just the one with an end-to-end test
+# ---------------------------------------------------------------------------
+
+
+def test_no_call_site_hardcodes_a_token_lifetime():
+    """A source guard, because there are five call sites and one covered path.
+
+    operational-review on PR #43: `qbo_callback` (two branches) and the manual
+    `refresh_company_token` route have the same gap that the service call site
+    had — no test drives them and asserts what they wrote, so reintroducing
+    `utcnow() + timedelta(hours=1)` at any of them would pass the whole suite.
+    Writing three more end-to-end tests would cover today's three sites; this
+    covers those and the next one somebody adds, which is the failure mode
+    that actually recurs.
+
+    Reads the source rather than a fixture, so it cannot be satisfied by
+    leaving a test list alone. `token_status.py` is excluded because that is
+    where the fallback constants are defined and used.
+    """
+    import pathlib
+
+    app_dir = pathlib.Path(__file__).resolve().parent.parent / "app"
+    offenders = []
+    for path in app_dir.rglob("*.py"):
+        if path.name == "token_status.py":
+            continue
+        text = path.read_text()
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if "timedelta(hours=1)" in line or "timedelta(days=100)" in line:
+                offenders.append(f"{path.relative_to(app_dir)}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "a token lifetime is hardcoded again; call token_expiries(auth_client) "
+        "so Intuit's own value is stored:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_guard_can_see_the_files_it_is_guarding():
+    """The companion that stops the guard above going vacuous.
+
+    Its only assertion is `not offenders`, accumulated in a loop — so a wrong
+    path, a rename, or an rglob that matches nothing leaves it green forever
+    while covering nothing. Exactly the shape found in the paging suite on
+    PR #44, where forcing route discovery to return [] left one test green and
+    turned its two siblings red.
+    """
+    import pathlib
+
+    app_dir = pathlib.Path(__file__).resolve().parent.parent / "app"
+    assert app_dir.is_dir(), f"{app_dir} is not a directory"
+    files = list(app_dir.rglob("*.py"))
+    assert len(files) >= 20, f"only found {len(files)} source files under {app_dir}"
+    assert any(p.name == "qbo_oauth.py" for p in files), "the OAuth router is not in scope"
+    assert any(p.name == "qbo_service.py" for p in files), "the service is not in scope"

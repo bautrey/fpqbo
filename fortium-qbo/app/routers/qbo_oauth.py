@@ -4,7 +4,6 @@ import logging
 import random
 import re
 import secrets
-from datetime import timedelta
 
 import httpx
 from fastapi import APIRouter, Request
@@ -18,6 +17,7 @@ from app.database import SessionLocal
 from app.models import AdminUser
 from app.models.qbo_company import QboCompany
 from app.services.session_service import verify_session
+from app.utils.token_status import apply_token_expiries
 from app.utils.clock import utcnow
 
 logger = logging.getLogger(__name__)
@@ -364,8 +364,7 @@ async def qbo_callback(
                 # Update existing company
                 existing.access_token = access_token
                 existing.refresh_token = refresh_token
-                existing.token_expires_at = utcnow() + timedelta(hours=1)
-                existing.refresh_token_expires_at = utcnow() + timedelta(days=100)
+                apply_token_expiries(existing, auth_client)
                 existing.token_status = "active"
                 existing.last_refreshed_at = utcnow()
                 existing.is_sandbox = is_sandbox
@@ -384,11 +383,13 @@ async def qbo_callback(
                     is_sandbox=is_sandbox,
                     access_token=access_token,
                     refresh_token=refresh_token,
-                    token_expires_at=utcnow() + timedelta(hours=1),
-                    refresh_token_expires_at=utcnow() + timedelta(days=100),
                     token_status="active",
                     last_refreshed_at=utcnow(),
                 )
+                # After construction rather than as kwargs: the two expiries go
+                # through one function at every call site, so a transposition
+                # has exactly one place to happen and that place is tested.
+                apply_token_expiries(new_company, auth_client)
                 db.add(new_company)
                 db.commit()
                 logger.info(f"Created new QBO company: {company_code}")
@@ -545,8 +546,7 @@ async def refresh_company_token(request: Request, company_id: int):
             # Update company record
             company.access_token = auth_client.access_token
             company.refresh_token = auth_client.refresh_token
-            company.token_expires_at = utcnow() + timedelta(hours=1)
-            company.refresh_token_expires_at = utcnow() + timedelta(days=100)
+            apply_token_expiries(company, auth_client)
             company.token_status = "active"
             company.last_refreshed_at = utcnow()
 
