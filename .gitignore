@@ -16,8 +16,7 @@ __pycache__/
 .DS_Store
 
 # Claude
-.claude/*
-!.claude/test-command
+.claude/
 
 # Backup files
 *.bak
@@ -31,10 +30,3 @@ yir2025/venv/
 # Dolt database files (added by bd init)
 .dolt/
 *.db
-
-# Local DB backups — contain live OAuth tokens, never commit
-.db-backups/
-
-# Session scratch outputs (not tracked)
-docs/scratch/
-.scratch/
