@@ -42,14 +42,25 @@ def _lifetime(raw, fallback: timedelta, label: str) -> timedelta:
 
     `int()` rather than a type check because Intuit sends these as JSON numbers
     and has been observed sending them as strings; both are the same fact.
+
+    OverflowError is caught alongside the conversion errors, and the timedelta
+    is built inside the same guard, because that is where the two remaining
+    escapes are: `int(float("inf"))` raises OverflowError, and an int large
+    enough to convert can still overflow `timedelta(seconds=...)`. Either one
+    escaping matters more here than it looks — `QBOService._refresh_token`
+    wraps the whole refresh in a broad `except` that rolls back, and Intuit has
+    ALREADY invalidated the old refresh token by then. So an unguarded
+    OverflowError costs that company a manual reconnect. Raised by
+    security-review on PR #43.
     """
     if raw is None:
         return fallback
     try:
         seconds = int(raw)
-    except (TypeError, ValueError):
+        candidate = timedelta(seconds=seconds)
+    except (TypeError, ValueError, OverflowError):
         logger.warning(
-            "Intuit sent a %s of %r, which is not a number of seconds; "
+            "Intuit sent a %s of %r, which is not a usable number of seconds; "
             "falling back to %s", label, raw, fallback
         )
         return fallback
@@ -59,7 +70,7 @@ def _lifetime(raw, fallback: timedelta, label: str) -> timedelta:
             "storing an expiry in the past", label, seconds, fallback
         )
         return fallback
-    return timedelta(seconds=seconds)
+    return candidate
 
 
 def token_expiries(auth_client) -> tuple[datetime, datetime]:
@@ -93,7 +104,22 @@ def token_expiries(auth_client) -> tuple[datetime, datetime]:
         FALLBACK_REFRESH_TOKEN_LIFETIME,
         "x_refresh_token_expires_in",
     )
-    return now + access, now + refresh
+    try:
+        return now + access, now + refresh
+    except OverflowError:
+        # Belt and braces for the addition itself. `_lifetime` already caps
+        # what it returns by constructing the timedelta inside its guard, so
+        # reaching here needs a fallback constant large enough to overflow
+        # datetime.max, which the two in this module are not. Guarded anyway
+        # because the cost of being wrong is the rotated refresh token.
+        logger.error(
+            "token expiry arithmetic overflowed; storing the documented "
+            "defaults instead"
+        )
+        return (
+            now + FALLBACK_ACCESS_TOKEN_LIFETIME,
+            now + FALLBACK_REFRESH_TOKEN_LIFETIME,
+        )
 
 
 def get_token_status(

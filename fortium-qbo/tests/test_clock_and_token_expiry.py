@@ -536,3 +536,130 @@ def test_the_refresh_path_still_persists_the_rotated_tokens(monkeypatch):
     assert company.refresh_token == "new-refresh"
     assert company.token_status == "active"
     assert company.last_refreshed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Values that escaped the guard, and the cost of escaping it
+# ---------------------------------------------------------------------------
+#
+# security-review on PR #43: `_lifetime` caught only (TypeError, ValueError),
+# and two shapes get past that. `int(float("inf"))` raises OverflowError, and
+# an int large enough to convert can still overflow `timedelta(seconds=...)`.
+#
+# Escaping matters more than the odds suggest. `QBOService._refresh_token`
+# wraps the whole refresh in a broad `except` that rolls back — and by the time
+# it runs, Intuit has ALREADY invalidated the old refresh token. So an
+# unguarded OverflowError does not degrade the expiry, it costs that company a
+# manual reconnect.
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [10**30, float("inf"), float("-inf"), float("nan"), 10**19],
+    ids=["huge-int", "inf", "-inf", "nan", "overflows-timedelta"],
+)
+def test_a_value_that_cannot_become_a_timedelta_falls_back_rather_than_raising(hostile):
+    before = utcnow()
+
+    access, refresh = token_expiries(_AuthClient(expires_in=hostile))
+
+    assert _minutes(access - before) == _minutes(FALLBACK_ACCESS_TOKEN_LIFETIME)
+    assert access > before
+
+
+def test_the_refresh_path_survives_a_hostile_expires_in(monkeypatch):
+    """The end that actually costs something.
+
+    Not a unit test of the guard — a test that `_refresh_token` completes and
+    commits the rotated tokens when Intuit sends a value that used to raise.
+    Before the fix this raised out of `token_expiries`, landed in the broad
+    except, rolled back, and left the company holding a refresh token Intuit
+    had already invalidated.
+    """
+    from app.services import qbo_service as mod
+    from types import SimpleNamespace
+
+    class _HostileAuthClient(_StubAuthClient):
+        def refresh(self):
+            super().refresh()
+            self.expires_in = float("inf")
+
+    _StubAuthClient.instances = []
+    monkeypatch.setattr(mod, "AuthClient", _HostileAuthClient)
+    monkeypatch.setattr(
+        mod,
+        "settings",
+        SimpleNamespace(
+            get_qbo_credentials=lambda region, is_sandbox=False: ("id", "secret"),
+            qbo_callback_url="https://example.invalid/callback",
+        ),
+    )
+
+    svc = mod.QBOService.__new__(mod.QBOService)
+    svc.db = _Db()
+    company = _refreshable_company()
+    before = utcnow()
+
+    svc._refresh_token(company)
+
+    assert company.refresh_token == "new-refresh", "the rotated token was lost"
+    assert company.token_status == "active"
+    assert svc.db.commits == 1, "the refresh rolled back"
+    assert company.token_expires_at > before
+
+
+# ---------------------------------------------------------------------------
+# All five call sites, not just the one with an end-to-end test
+# ---------------------------------------------------------------------------
+
+
+def test_no_call_site_hardcodes_a_token_lifetime():
+    """A source guard, because there are five call sites and one covered path.
+
+    operational-review on PR #43: `qbo_callback` (two branches) and the manual
+    `refresh_company_token` route have the same gap that the service call site
+    had — no test drives them and asserts what they wrote, so reintroducing
+    `utcnow() + timedelta(hours=1)` at any of them would pass the whole suite.
+    Writing three more end-to-end tests would cover today's three sites; this
+    covers those and the next one somebody adds, which is the failure mode
+    that actually recurs.
+
+    Reads the source rather than a fixture, so it cannot be satisfied by
+    leaving a test list alone. `token_status.py` is excluded because that is
+    where the fallback constants are defined and used.
+    """
+    import pathlib
+
+    app_dir = pathlib.Path(__file__).resolve().parent.parent / "app"
+    offenders = []
+    for path in app_dir.rglob("*.py"):
+        if path.name == "token_status.py":
+            continue
+        text = path.read_text()
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if "timedelta(hours=1)" in line or "timedelta(days=100)" in line:
+                offenders.append(f"{path.relative_to(app_dir)}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "a token lifetime is hardcoded again; call token_expiries(auth_client) "
+        "so Intuit's own value is stored:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_guard_can_see_the_files_it_is_guarding():
+    """The companion that stops the guard above going vacuous.
+
+    Its only assertion is `not offenders`, accumulated in a loop — so a wrong
+    path, a rename, or an rglob that matches nothing leaves it green forever
+    while covering nothing. Exactly the shape found in the paging suite on
+    PR #44, where forcing route discovery to return [] left one test green and
+    turned its two siblings red.
+    """
+    import pathlib
+
+    app_dir = pathlib.Path(__file__).resolve().parent.parent / "app"
+    assert app_dir.is_dir(), f"{app_dir} is not a directory"
+    files = list(app_dir.rglob("*.py"))
+    assert len(files) >= 20, f"only found {len(files)} source files under {app_dir}"
+    assert any(p.name == "qbo_oauth.py" for p in files), "the OAuth router is not in scope"
+    assert any(p.name == "qbo_service.py" for p in files), "the service is not in scope"
