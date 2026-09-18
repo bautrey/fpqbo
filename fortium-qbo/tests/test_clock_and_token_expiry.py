@@ -410,3 +410,129 @@ def test_the_two_lifetimes_are_read_independently():
 
     assert 29 <= _minutes(access - before) <= 31
     assert 9 <= (refresh - before).days <= 10
+
+
+# ---------------------------------------------------------------------------
+# The call sites, not just the helper
+# ---------------------------------------------------------------------------
+#
+# The tests above all call `token_expiries` directly. Every one of them passed
+# while `_refresh_token` still wrote `utcnow() + timedelta(hours=1)` — reverting
+# that single line left the whole suite green. A helper nothing calls is a
+# helper that fixes nothing, so these exercise the path that actually writes to
+# the database.
+
+
+class _StubAuthClient:
+    """Stands in for intuitlib's AuthClient inside `_refresh_token`.
+
+    `refresh()` is where the attributes appear in the real thing: send_request
+    copies the token response onto the client. This does the same, so a test
+    that read them before `refresh()` would see nothing, exactly as production
+    would.
+    """
+
+    instances: list = []
+
+    def __init__(self, **kwargs):
+        self.access_token = kwargs.get("access_token")
+        self.refresh_token = kwargs.get("refresh_token")
+        self.expires_in = None
+        self.x_refresh_token_expires_in = None
+        type(self).instances.append(self)
+
+    def refresh(self):
+        self.access_token = "new-access"
+        self.refresh_token = "new-refresh"
+        self.expires_in = 1800
+        self.x_refresh_token_expires_in = 60 * 60 * 24 * 30
+
+
+class _Db:
+    def __init__(self):
+        self.commits = 0
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+
+def _refreshable_company():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        code="FOR-138",
+        region="US",
+        is_sandbox=False,
+        access_token="old-access",
+        refresh_token="old-refresh",
+        token_expires_at=None,
+        refresh_token_expires_at=None,
+        last_refreshed_at=None,
+        token_status="active",
+    )
+
+
+def _run_refresh(monkeypatch):
+    """Drive QBOService._refresh_token with everything external stubbed."""
+    from app.services import qbo_service as mod
+
+    _StubAuthClient.instances = []
+    monkeypatch.setattr(mod, "AuthClient", _StubAuthClient)
+    # The whole settings object, not one attribute: Settings is a pydantic
+    # model and refuses setattr for a field it does not declare.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        mod,
+        "settings",
+        SimpleNamespace(
+            get_qbo_credentials=lambda region, is_sandbox=False: ("id", "secret"),
+            qbo_callback_url="https://example.invalid/callback",
+        ),
+    )
+
+    svc = mod.QBOService.__new__(mod.QBOService)
+    svc.db = _Db()
+    company = _refreshable_company()
+
+    before = utcnow()
+    svc._refresh_token(company)
+    return company, before
+
+
+def test_the_refresh_path_stores_intuits_access_expiry(monkeypatch):
+    """Reverting this call site to `+ timedelta(hours=1)` must turn this red.
+
+    It is the write that matters most: `_needs_refresh` compares against this
+    column, so a stored hour against a real half hour means thirty minutes of
+    the service believing a dead token is live.
+    """
+    company, before = _run_refresh(monkeypatch)
+
+    minutes = round((company.token_expires_at - before).total_seconds() / 60)
+    assert 29 <= minutes <= 31, f"stored {minutes} minutes, Intuit said 30"
+
+
+def test_the_refresh_path_stores_intuits_refresh_expiry(monkeypatch):
+    company, before = _run_refresh(monkeypatch)
+
+    days = (company.refresh_token_expires_at - before).days
+    assert 29 <= days <= 30, f"stored {days} days, Intuit said 30"
+
+
+def test_the_refresh_path_still_persists_the_rotated_tokens(monkeypatch):
+    """Intuit invalidates the old refresh token on every refresh.
+
+    Asserted alongside the expiries because this is the one code path where
+    losing the write costs a manual reconnect, and a change to the lines above
+    it must not disturb it.
+    """
+    company, _ = _run_refresh(monkeypatch)
+
+    assert company.access_token == "new-access"
+    assert company.refresh_token == "new-refresh"
+    assert company.token_status == "active"
+    assert company.last_refreshed_at is not None
