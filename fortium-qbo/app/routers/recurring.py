@@ -45,13 +45,16 @@ async def list_recurring_transactions(
     ),
     qbo: QBOService = Depends(_get_service),
 ) -> list[dict[str, Any]]:
-    """List every recurring transaction, and say whether that is all of them.
+    """List recurring transactions, and say whether that is all of them.
 
     Not paged and cannot be (#20): rows arrive shaped `{"JournalEntry": ...}`
     with no top-level `Id`, so ordering by Id is unavailable and an offset
     would return duplicates forever. `X-Total-Count` and `X-Has-More` are
-    sent; `X-Next-Offset` is not. In production the connected companies hold
-    14, 0, 0 and 0 of these, so the ceiling is nowhere near.
+    sent; `X-Next-Offset` is not.
+
+    `X-Has-More: true` means the answer stopped at `max_results` with rows
+    left over. In production the connected companies hold 14, 0, 0 and 0 of
+    these, so a default request returns all of them.
     """
     try:
         page = await qbo.get_recurring_transactions(

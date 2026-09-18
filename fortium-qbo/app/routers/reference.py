@@ -95,15 +95,18 @@ async def list_exchange_rates(
     ),
     qbo: QBOService = Depends(_get_service),
 ) -> list[dict[str, Any]]:
-    """List every exchange rate, and say whether that is all of them.
+    """List exchange rates, and say whether that is all of them.
 
     Not paged and cannot be: ExchangeRate is keyed by `AsOfDate` and the
     currency pair and carries no `Id`, so there is nothing stable to order
     by and an offset would return duplicates. `X-Total-Count` and
     `X-Has-More` are still sent; `X-Next-Offset` is not, because there is
-    no cursor to give. `X-Has-More: true` here means the 1000-row ceiling
-    truncated the answer and there is no way through this API to reach the
-    rest.
+    no cursor to give.
+
+    `X-Has-More: true` means the answer stopped at `max_results` with rows
+    left over, and there is no way through this API to reach them. Raising
+    `max_results` is the only lever, and it caps at 1000 — which FOR-138
+    already hits, so this endpoint is losing rows today.
     """
     try:
         page = await qbo.get_exchange_rates(
