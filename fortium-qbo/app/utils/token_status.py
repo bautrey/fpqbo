@@ -73,7 +73,41 @@ def _lifetime(raw, fallback: timedelta, label: str) -> timedelta:
     return candidate
 
 
-def token_expiries(auth_client) -> tuple[datetime, datetime]:
+def apply_token_expiries(target, auth_client) -> None:
+    """Write both expiries onto `target` from Intuit's own values.
+
+    Exists because `token_expiries` returns a PAIR, and five call sites each
+    unpacked that pair and assigned the halves by position. Nothing caught a
+    swap: mutating `qbo_callback` to
+
+        refresh_token_expires_at, token_expires_at = token_expiries(...)
+
+    passed all 1037 tests. That stores 100 days on the access token, so
+    `_needs_refresh` never fires and the company silently stops refreshing
+    until Intuit expires the grant outright.
+
+    Ordering cannot be got wrong here, because the caller never sees the two
+    apart. One function, one place to be wrong, and it is covered end to end
+    by the `_refresh_token` tests — which is the difference from testing each
+    of the five sites separately, and from the source guard, which sees a
+    hardcoded constant and not a transposition.
+
+    `target` is anything with the two attributes: a QboCompany row, or one
+    being built.
+    """
+    expiries = token_expiries(auth_client)
+    target.token_expires_at = expiries.access
+    target.refresh_token_expires_at = expiries.refresh
+
+
+class TokenExpiries(NamedTuple):
+    """The two expiries, named, so a positional mistake has to be spelled out."""
+
+    access: datetime
+    refresh: datetime
+
+
+def token_expiries(auth_client) -> "TokenExpiries":
     """When the access and refresh tokens actually expire, per Intuit.
 
     Every token response carries `expires_in` and `x_refresh_token_expires_in`,
@@ -105,7 +139,7 @@ def token_expiries(auth_client) -> tuple[datetime, datetime]:
         "x_refresh_token_expires_in",
     )
     try:
-        return now + access, now + refresh
+        return TokenExpiries(now + access, now + refresh)
     except OverflowError:
         # Belt and braces for the addition itself. `_lifetime` already caps
         # what it returns by constructing the timedelta inside its guard, so
@@ -116,7 +150,7 @@ def token_expiries(auth_client) -> tuple[datetime, datetime]:
             "token expiry arithmetic overflowed; storing the documented "
             "defaults instead"
         )
-        return (
+        return TokenExpiries(
             now + FALLBACK_ACCESS_TOKEN_LIFETIME,
             now + FALLBACK_REFRESH_TOKEN_LIFETIME,
         )

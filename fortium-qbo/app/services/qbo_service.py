@@ -67,7 +67,7 @@ from app.models.qbo_company import QboCompany
 from app.exceptions import QboCompanyDisconnected, QboNotFound, QboUnavailable
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
 from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
-from app.utils.token_status import token_expiries
+from app.utils.token_status import apply_token_expiries
 from app.utils.clock import as_utc, utcnow
 
 logger = logging.getLogger(__name__)
@@ -355,9 +355,7 @@ class QBOService:
             # Intuit states both lifetimes in the response `refresh()` just
             # received; `intuitlib.utils.send_request` copies every key of it
             # onto the client, so these are read rather than assumed (#34).
-            company.token_expires_at, company.refresh_token_expires_at = (
-                token_expiries(auth_client)
-            )
+            apply_token_expiries(company, auth_client)
             company.last_refreshed_at = utcnow()
             company.token_status = "active"
 
