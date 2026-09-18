@@ -652,7 +652,11 @@ class QBOService:
                 rows=rows, offset=0, total=len(rows), has_more=False, pageable=False
             )
 
-        total = await self._count_matching(entity, client=client, clause=None, op=op)
+        total = self._trustworthy_total(
+            await self._count_matching(entity, client=client, clause=None, op=op),
+            0,
+            len(rows),
+        )
         return PagedResult(
             rows=rows,
             offset=0,
@@ -660,6 +664,41 @@ class QBOService:
             has_more=total is None or total > len(rows),
             pageable=False,
         )
+
+    @staticmethod
+    def _trustworthy_total(total: int | None, offset: int, row_count: int) -> int | None:
+        """Drop a COUNT that contradicts the rows already in hand.
+
+        QuickBooks does not answer COUNT meaningfully for every entity, and it
+        does not say so. Measured against production on 2026-09-18, the day
+        this shipped: `/api/reference/exchange-rates` returns as many rows as
+        asked — 100, 500, 1000 — while `SELECT COUNT(*) FROM ExchangeRate`
+        answers 100 every time. So the endpoint served 1000 rows alongside
+        `X-Total-Count: 100` and `X-Has-More: false`, claiming a complete
+        result set while truncating 900 rows. That is precisely the failure the
+        paging work exists to remove, reintroduced through the COUNT.
+
+        The invariant: rows were just observed at positions
+        [offset, offset + row_count), so a total below `offset + row_count`
+        contradicts data already in hand and cannot be believed. An unbelievable
+        total becomes None, which every caller already treats as "size unknown"
+        and which forces `has_more` True — the safe reading.
+
+        No constraint when `row_count` is 0: an empty page past the end proves
+        nothing about the size, and `total` legitimately sits below `offset`
+        there.
+        """
+        if total is None or row_count == 0:
+            return total
+        if total < offset + row_count:
+            logger.error(
+                "QuickBooks COUNT returned %d but %d row(s) were served from "
+                "offset %d; discarding the count as unusable and reporting the "
+                "size as unknown",
+                total, row_count, offset,
+            )
+            return None
+        return total
 
     async def _fetch_page(
         self,
@@ -708,6 +747,7 @@ class QBOService:
             # next_offset of offset + 0 — a cursor that never advances.
             return PagedResult(rows=rows, offset=offset, total=total, has_more=False)
 
+        total = self._trustworthy_total(total, offset, len(rows))
         has_more = total is None or total > offset + len(rows)
         return PagedResult(rows=rows, offset=offset, total=total, has_more=has_more)
 

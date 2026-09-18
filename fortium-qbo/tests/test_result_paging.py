@@ -1230,8 +1230,13 @@ def test_every_paged_list_endpoint_declares_its_headers_in_the_schema():
     from app.main import app
 
     schema = app.openapi()
+    routes = _api_list_routes()
+    # Without this the test is vacuous: its only assertion accumulates inside
+    # the loop, so route discovery returning [] leaves it green while its two
+    # siblings go red. Verified by forcing _api_list_routes() to return [].
+    assert len(routes) >= 30, f"only found {len(routes)} list routes — check the filter"
     missing = []
-    for route in _api_list_routes():
+    for route in routes:
         if route.path in BOUNDED_ROUTES:
             continue
         declared = (
@@ -1355,7 +1360,11 @@ def test_an_unpageable_entity_is_never_ordered_by_id(monkeypatch, attr, method):
     asyncio.run(getattr(svc, method)(company_id=1))
 
     assert entity.all_calls, "the unpageable reads go through ListMixin.all()"
-    assert all(c["start_position"] in ("", None) for c in entity.all_calls)
+    # Asserting `start_position == ""` here would be dead: the service never
+    # passes one, so the mock records the default whatever the code does. The
+    # live assertion is `_UnorderedEntity.where`, which raises — a future
+    # change that routes these through the paged path fails there.
+    assert entity.all_calls[0]["max_results"] == PAGE
 
 
 SIGNAL_ONLY_ENDPOINTS = [
@@ -1420,3 +1429,160 @@ def test_the_cursorless_endpoints_offer_no_cursor(module, path):
     rejected = client.get(path, params={"company_id": 1, "offset": 1000})
     assert rejected.status_code == 200, "an unknown query param is ignored, not an error"
     assert "X-Next-Offset" not in rejected.headers
+
+
+# ---------------------------------------------------------------------------
+# A COUNT that contradicts the rows in hand
+# ---------------------------------------------------------------------------
+#
+# Found in production minutes after the paging change merged, which is the
+# only reason it was found at all: /api/reference/exchange-rates served 1000
+# rows with `X-Total-Count: 100` and `X-Has-More: false`. QuickBooks answers
+# `SELECT COUNT(*) FROM ExchangeRate` with 100 regardless of how many rows the
+# same query will return — measured at max_results 100, 500 and 1000, each
+# returning exactly that many rows against a constant count of 100.
+#
+# So the endpoint claimed a complete result set while dropping 900 rows. The
+# COUNT was trusted over data already in hand, and it is the one input here
+# that can be wrong without failing.
+
+
+class _UndercountingEntity(_FakeEntity):
+    """QuickBooks answering COUNT with a number below what it just served."""
+
+    def __init__(self, ledger_size: int, count_answer: int):
+        super().__init__(ledger_size)
+        self.count_answer = count_answer
+
+    def count(self, where_clause="", qb=None):
+        self.count_calls.append(where_clause)
+        return self.count_answer
+
+
+@pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
+def test_a_count_below_the_rows_served_is_discarded(monkeypatch, attr, method):
+    """A full page with a total smaller than the page is not a complete set.
+
+    Trusting the count here is what shipped the defect: `has_more` came out
+    false because `100 > 1000` is false, and the response said "that was all
+    of them" over a page that had been cut off.
+    """
+    entity = _UndercountingEntity(ledger_size=5000, count_answer=100)
+    svc = _service(monkeypatch, attr, entity)
+
+    page = asyncio.run(getattr(svc, method)(company_id=1))
+
+    assert len(page.rows) == PAGE
+    assert page.total is None, "an impossible count must not be reported as the size"
+    assert page.has_more is True, "claimed complete while truncating"
+
+
+@pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
+def test_a_count_below_the_rows_served_is_discarded_past_the_first_page(
+    monkeypatch, attr, method
+):
+    """Same check at an offset, where the invariant involves both numbers.
+
+    Rows were observed at [offset, offset + len(rows)), so the count has to
+    reach the far end of that range to be believable.
+    """
+    entity = _UndercountingEntity(ledger_size=5000, count_answer=1500)
+    svc = _service(monkeypatch, attr, entity)
+
+    page = asyncio.run(getattr(svc, method)(company_id=1, offset=2000))
+
+    assert len(page.rows) == PAGE
+    assert page.total is None
+    assert page.has_more is True
+
+
+@pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
+def test_a_count_that_exactly_covers_the_page_is_believed(monkeypatch, attr, method):
+    """The boundary. `total == offset + len(rows)` is consistent, not a lie.
+
+    Discarding it would turn every exactly-one-page result into "size unknown,
+    may continue" and make the complete case unrepresentable.
+    """
+    entity = _UndercountingEntity(ledger_size=5000, count_answer=PAGE)
+    svc = _service(monkeypatch, attr, entity)
+
+    page = asyncio.run(getattr(svc, method)(company_id=1))
+
+    assert page.total == PAGE
+    assert page.has_more is False
+
+
+@pytest.mark.parametrize("attr,method", LIST_METHODS, ids=LIST_IDS)
+def test_an_empty_page_past_the_end_still_accepts_a_smaller_total(
+    monkeypatch, attr, method
+):
+    """No rows in hand means no contradiction available.
+
+    At offset 5000 of a 42-row ledger the page is empty and a total of 42 sits
+    far below the offset. That is consistent — nothing was observed out there
+    — and discarding it would throw away the only size information the caller
+    gets on an overshoot.
+    """
+    entity = _UndercountingEntity(ledger_size=42, count_answer=42)
+    svc = _service(monkeypatch, attr, entity)
+
+    page = asyncio.run(getattr(svc, method)(company_id=1, offset=5000))
+
+    assert page.rows == []
+    assert page.total == 42, "an empty page contradicts nothing"
+    assert page.has_more is False
+
+
+@pytest.mark.parametrize("attr,method", SIGNAL_ONLY, ids=SIGNAL_ONLY_IDS)
+def test_the_cursorless_endpoints_discard_an_impossible_count_too(
+    monkeypatch, attr, method
+):
+    """The endpoint the production defect was actually on.
+
+    /api/reference/exchange-rates has no cursor, so `has_more` is the entire
+    signal it offers. Getting it wrong there is not a degraded answer, it is
+    the wrong answer to the only question the endpoint can be asked.
+    """
+    entity = _UnorderedEntity(ledger_size=5000)
+    entity.count_answer = 100
+
+    def _count(where_clause="", qb=None):
+        entity.count_calls.append(where_clause)
+        return 100
+
+    entity.count = _count
+    svc = _service(monkeypatch, attr, entity)
+
+    page = asyncio.run(getattr(svc, method)(company_id=1))
+
+    assert len(page.rows) == PAGE
+    assert page.total is None
+    assert page.has_more is True
+    assert page.next_offset is None, "still no cursor to offer"
+
+
+@pytest.mark.parametrize(
+    "module,path", SIGNAL_ONLY_ENDPOINTS, ids=SIGNAL_ONLY_ENDPOINT_IDS
+)
+def test_max_results_reaches_the_service_on_the_cursorless_endpoints(module, path):
+    """The only knob these two have, and nothing checked it arrived.
+
+    Found by deleting `max_results=max_results` from the service call in each
+    router: both deletions passed the whole suite. The router would declare the
+    parameter, validate it, and discard it, so a caller asking for 25 rows
+    would receive 1000 — and with no cursor on these endpoints there is no
+    second signal to notice it by.
+
+    The paged endpoints have `test_offset_is_declared_and_reaches_the_service`
+    for this. It was written for `offset`, which these two do not have, so they
+    fell through the gap between the two groups.
+    """
+    page = PagedResult(rows=[{"Id": "1"}], offset=0, total=1, has_more=False, pageable=False)
+    client, service = _client(module, page)
+
+    res = client.get(path, params={"company_id": 1, "max_results": 25})
+
+    assert res.status_code == 200
+    assert service.calls, "the router never called the service"
+    _, kwargs = service.calls[0]
+    assert kwargs["max_results"] == 25, f"router discarded max_results: {kwargs}"
