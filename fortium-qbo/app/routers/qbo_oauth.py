@@ -341,7 +341,6 @@ async def qbo_callback(
 
         access_token = auth_client.access_token
         refresh_token = auth_client.refresh_token
-        # Intuit states both lifetimes in the token response it just sent.
 
         if not access_token or not refresh_token:
             logger.error("Token exchange returned empty tokens")
