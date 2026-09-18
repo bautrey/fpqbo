@@ -198,19 +198,25 @@ def test_a_610_from_the_DELETE_is_not_reported_as_not_found(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_quickbooks_own_response_is_passed_through(monkeypatch):
-    """#35 asked for the response rather than a summary of it."""
-    credit = _FakeCredit(
-        response={
-            "VendorCredit": {"Id": "96159", "status": "Deleted", "domain": "QBO"},
-            "time": "2026-09-18T14:00:00.000-07:00",
-        }
-    )
+def test_quickbooks_own_response_is_passed_through_whole(monkeypatch):
+    """#35 asked for the response rather than a summary of it.
+
+    Whole means whole. An earlier cut unwrapped to `["VendorCredit"]`, which
+    dropped `time` — a caller can reach into a response we hand over intact,
+    and cannot recover a field we discarded.
+    """
+    body = {
+        "VendorCredit": {"Id": "96159", "status": "Deleted", "domain": "QBO"},
+        "time": "2026-09-18T14:00:00.000-07:00",
+    }
+    credit = _FakeCredit(response=body)
     svc = _service(monkeypatch, credit=credit)
 
     result = _run(svc.delete_vendor_credit(1, 96159))
 
-    assert result == {"Id": "96159", "status": "Deleted", "domain": "QBO"}
+    assert result == body
+    assert result["time"] == "2026-09-18T14:00:00.000-07:00"
+    assert result["VendorCredit"]["status"] == "Deleted"
 
 
 def test_an_unrecognised_response_still_confirms_the_delete(monkeypatch):

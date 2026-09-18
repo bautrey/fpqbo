@@ -2223,9 +2223,13 @@ class QBOService:
         summarising it.
 
         Returns:
-            QBO's own delete response for the credit. Falls back to a synthetic
-            `{"Id", "status"}` only if QBO answers in a shape we do not
-            recognise, so the caller can still tell the delete happened.
+            QBO's delete response **whole**, exactly as QuickBooks sent it —
+            typically `{"VendorCredit": {...}, "time": "..."}`. Unwrapping to
+            the entity would discard `time` and any sibling key QBO adds later,
+            and a caller reconciling a correction against QuickBooks wants what
+            QuickBooks said rather than the part we guessed was interesting.
+            Falls back to a synthetic `{"Id", "status"}` only when QBO answers
+            in a shape that is not a dict at all, so the outcome is never lost.
 
         Raises:
             QboNotFound: no credit with that id in this company.
@@ -2261,10 +2265,12 @@ class QBOService:
         deleted = await asyncio.to_thread(_delete)
 
         if isinstance(deleted, dict):
-            # QBO answers {"VendorCredit": {...}, "time": ...}. Hand back the
-            # entity when it is there, the whole body when it is not, so
-            # nothing QuickBooks said is discarded on the way out.
-            return deleted.get("VendorCredit") or deleted
+            # Whole, not unwrapped. An earlier cut returned
+            # `deleted.get("VendorCredit") or deleted`, which silently dropped
+            # `time` and would drop any key QBO adds in future — the opposite
+            # of what #35 asked for. The caller can reach the entity at
+            # `["VendorCredit"]`; it cannot recover a field we threw away.
+            return deleted
         return {"Id": str(entity_id), "status": "Deleted"}
 
     # -------------------------------------------------------------------------

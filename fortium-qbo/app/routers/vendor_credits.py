@@ -131,7 +131,9 @@ async def delete_vendor_credit(
         QBO API error: QB Validation Exception 6240: <message>
         <detail>
 
-    Returns QuickBooks' own delete response rather than a summary of it.
+    Returns QuickBooks' delete response whole — typically
+    `{"VendorCredit": {...}, "time": "..."}`. The entity is at
+    `["VendorCredit"]`; nothing QuickBooks sent is stripped on the way out.
     404 when no credit with that id exists in this company.
     """
     return await run_qbo_write(
