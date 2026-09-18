@@ -2228,8 +2228,10 @@ class QBOService:
             the entity would discard `time` and any sibling key QBO adds later,
             and a caller reconciling a correction against QuickBooks wants what
             QuickBooks said rather than the part we guessed was interesting.
-            Falls back to a synthetic `{"Id", "status"}` only when QBO answers
-            in a shape that is not a dict at all, so the outcome is never lost.
+        Raises:
+            QboUnavailable: QuickBooks answered with a Fault the SDK discarded,
+                so the delete's outcome is genuinely unknown. Never reported as
+                success — see the comment at the raise.
 
         Raises:
             QboNotFound: no credit with that id in this company.
@@ -2240,17 +2242,24 @@ class QBOService:
         def _fetch():
             return VendorCredit.get(entity_id, qb=client)
 
-        # Only the FETCH is inside the not-found mapping, matching
-        # void_bill_payment. A 610 raised by the delete itself is not "the
-        # credit was never there", and reporting it as a 404 would tell a
-        # caller that never retries a 404 that a delete which may have fired
-        # never did.
+        # The FETCH retries — it is a read, and a retry cannot delete anything.
+        # Only the delete below is barred from the retry helper. Leaving the
+        # read unretried made a transient fault on the lookup surface as a
+        # failed delete, which is a robustness loss against every other read in
+        # this service for no safety gain.
+        #
+        # Only the fetch is inside the not-found mapping, matching
+        # void_bill_payment: a 610 from the delete itself is a different event
+        # and answering 404 there would report "no such credit" for a call that
+        # reached QuickBooks with the credit in hand.
         #
         # ReadMixin.get() returns from_json(...) or raises; it never returns a
         # falsy object. delete_bill's `if not bill:` guard is dead code for
         # exactly that reason and is deliberately not copied here.
         try:
-            existing = await asyncio.to_thread(_fetch)
+            existing = await self._to_thread_with_retry(
+                _fetch, op="delete_vendor_credit_fetch"
+            )
         except ObjectNotFoundException as exc:
             raise QboNotFound(f"VendorCredit {entity_id} not found") from exc
 
@@ -2271,7 +2280,25 @@ class QBOService:
             # of what #35 asked for. The caller can reach the entity at
             # `["VendorCredit"]`; it cannot recover a field we threw away.
             return deleted
-        return {"Id": str(entity_id), "status": "Deleted"}
+
+        # Anything else means None, and None means QuickBooks sent a Fault the
+        # SDK dropped on the floor: client.make_request does
+        #     if "Fault" in result: self.handle_exceptions(result["Fault"])
+        # and handle_exceptions loops over results["Error"], so an EMPTY Error
+        # list raises nothing, the function returns, and make_request falls off
+        # the end returning None. Verified against the installed SDK.
+        #
+        # So this branch is the one place we know LEAST about whether the
+        # credit is gone. An earlier cut answered 200 {"status": "Deleted"}
+        # here, which invents the outcome rather than preserving it and tells
+        # an operator reconciling a correction to stop looking at a credit that
+        # may still be in the books. Refuse instead; run_qbo_write logs it and
+        # answers 500.
+        raise QboUnavailable(
+            f"QuickBooks returned no usable response deleting VendorCredit "
+            f"{entity_id}. It sent a Fault the SDK discarded, so whether the "
+            f"credit was deleted is unknown — re-read it before retrying."
+        )
 
     # -------------------------------------------------------------------------
     # Item

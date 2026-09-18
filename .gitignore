@@ -32,5 +32,9 @@ yir2025/venv/
 .dolt/
 *.db
 
+# Local DB backups — contain live OAuth tokens, never commit
+.db-backups/
+
 # Session scratch outputs (not tracked)
 docs/scratch/
+.scratch/

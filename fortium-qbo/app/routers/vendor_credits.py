@@ -128,8 +128,13 @@ async def delete_vendor_credit(
     answer. It arrives in the 500's `detail`, carrying QuickBooks' own error
     code and message, because that is the part worth reading:
 
-        QBO API error: QB Validation Exception 6240: <message>
+        QBO API error: QB Exception 6240: <message>
         <detail>
+
+    Note the exact prefix. The SDK maps 2000-4999 to ValidationException and
+    renders those as "QB Validation Exception", but 6240 falls past that range
+    into the bare QuickbooksException, which renders "QB Exception". A log rule
+    or client matching the Validation form never fires on a closed period.
 
     Returns QuickBooks' delete response whole — typically
     `{"VendorCredit": {...}, "time": "..."}`. The entity is at
