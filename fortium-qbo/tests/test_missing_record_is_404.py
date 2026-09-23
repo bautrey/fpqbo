@@ -163,23 +163,36 @@ def test_catching_only_object_not_found_would_leave_three_endpoints_at_500(monke
 # ---------------------------------------------------------------------------
 
 
-def test_quickbooks_own_words_survive_into_the_404(monkeypatch):
+@pytest.mark.parametrize(
+    "raised,must_appear",
+    [
+        (NOT_FOUND_610, "Object Not Found"),
+        (INVALID_PROPERTY_2010, "invalid or unsupported property"),
+        (INVALID_REFERENCE_2500, "Invalid Reference Id"),
+    ],
+    ids=["610", "2010", "2500"],
+)
+def test_quickbooks_own_words_survive_into_the_404(monkeypatch, raised, must_appear):
     """The caller has to be able to tell WHY, not just that it failed.
 
-    2500's message names the entity and the id outright — "TaxAgency element
-    id 999999 not found" — and that is more useful than anything this service
-    could synthesise, so it rides along in the detail rather than being
-    summarised away.
+    Parametrized over all three on purpose. The 610 arm shipped dropping
+    QuickBooks' text while the validation arm kept it, so the docstring's claim
+    held for the three validation endpoints and failed for the twenty-eight
+    that answer 610 — and no test saw it, because the only case asserted here
+    was 2500. CodeRabbit caught it.
+
+    610's text is not boilerplate everywhere either: tax codes and tax rates
+    answer "Object Not Found : TaxCode" and "Object Not Found : TaxRate".
     """
-    entity = _Entity(raises=INVALID_REFERENCE_2500)
+    entity = _Entity(raises=raised)
     svc = _service(monkeypatch, entity)
 
     with pytest.raises(QboNotFound) as exc:
-        _run(svc._fetch_by_id(entity, 999999, client=object(), op="t", label="TaxAgency"))
+        _run(svc._fetch_by_id(entity, 999999, client=object(), op="t", label="Thing"))
 
     detail = str(exc.value.detail)
     assert "999999" in detail
-    assert "Invalid Reference Id" in detail, f"QuickBooks' own text was dropped: {detail}"
+    assert must_appear in detail, f"QuickBooks' own text was dropped: {detail}"
 
 
 def test_a_throttled_read_is_never_reported_as_a_missing_record(monkeypatch):

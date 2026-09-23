@@ -767,8 +767,13 @@ class QBOService:
         defensive code for a case that cannot arise. Validation errors on the
         WRITE paths are untouched — this helper is only reached by by-id reads.
 
-        QuickBooks' own message rides along in the detail, per the rule that
-        its words reach the caller rather than being summarised away.
+        QuickBooks' own message rides along in the detail on ALL THREE, per the
+        rule that its words reach the caller rather than being summarised away.
+        The 610 arm used to drop it while the validation arm kept it, which made
+        the claim true of three endpoints and false of twenty-eight. Its text is
+        not always boilerplate either: tax codes and tax rates answer 610 with
+        "Object Not Found : TaxCode" and "Object Not Found : TaxRate", naming
+        the entity the caller asked about.
         """
         def _get():
             return entity.get(entity_id, qb=client)
@@ -776,7 +781,7 @@ class QBOService:
         try:
             return await self._to_thread_with_retry(_get, op=op)
         except ObjectNotFoundException as exc:
-            raise QboNotFound(f"{label} {entity_id} not found") from exc
+            raise QboNotFound(f"{label} {entity_id} not found: {exc}") from exc
         except ValidationException as exc:
             if exc.error_code == QBO_THROTTLE_EXCEEDED:
                 raise
