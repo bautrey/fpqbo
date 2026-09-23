@@ -22,7 +22,16 @@ measurement and applied it to 31. Review caught the gap; the remaining nine
 were measured and tax agencies answered with a third code, which would have
 left /api/tax/agencies/{id} still returning 500. Enumerating codes is
 whack-a-mole, so the helper catches the CLASS: on a by-id GET the id is the
-only caller-supplied property, so any validation failure is about the id.
+only caller-supplied property, so a validation failure about the REQUEST is
+about the id.
+
+**One code in that band is not about the request, and it is the dangerous
+one.** `3001 ThrottleExceeded` is QuickBooks saying the client has called too
+often, and it arrives as the same ValidationException. Caught by class it
+becomes "this record does not exist" — a definite answer about a record the
+service never looked at, produced exactly when the service is under load. It
+is excluded, and both the exclusion and the constant behind it are pinned
+below.
 """
 
 import asyncio
@@ -62,6 +71,13 @@ INVALID_REFERENCE_2500 = ValidationException(
     "Invalid Reference Id",
     error_code=2500,
     detail="Invalid Reference Id : TaxAgency element id 999999 not found",
+)
+# Rate limiting. Same class, same band, and NOT about the request — QuickBooks
+# answers HTTP 429 with code 3001 when the client has made too many calls.
+THROTTLE_EXCEEDED_3001 = ValidationException(
+    "ThrottleExceeded",
+    error_code=3001,
+    detail="",
 )
 
 
@@ -164,6 +180,43 @@ def test_quickbooks_own_words_survive_into_the_404(monkeypatch):
     detail = str(exc.value.detail)
     assert "999999" in detail
     assert "Invalid Reference Id" in detail, f"QuickBooks' own text was dropped: {detail}"
+
+
+def test_a_throttled_read_is_never_reported_as_a_missing_record(monkeypatch):
+    """The hole in the structural argument, found by CodeRabbit on pass 2.
+
+    3001 ThrottleExceeded is a ValidationException like 2010 and 2500, and it
+    sits in the same 2000-4999 band, but it is not a complaint about the
+    request — it is a complaint about how many requests have been made. A
+    class-wide catch turns it into "this record does not exist", which is a
+    definite answer about a record the service never managed to look at, at
+    exactly the moment it is under load.
+
+    The caller this PR was opened for is a link validator. Under throttling it
+    would have retired live QuickBooks customers as missing.
+    """
+    entity = _Entity(raises=THROTTLE_EXCEEDED_3001)
+    svc = _service(monkeypatch, entity)
+
+    with pytest.raises(ValidationException) as exc:
+        _run(svc._fetch_by_id(entity, 1397, client=object(), op="t", label="Customer"))
+
+    assert exc.value.error_code == 3001
+    assert not isinstance(exc.value, QboNotFound)
+
+
+def test_the_throttle_code_the_helper_excludes_is_the_documented_one():
+    """Stops the test above passing against a constant that drifted.
+
+    If QBO_THROTTLE_EXCEEDED were edited to some code QuickBooks never sends,
+    the exclusion would stop working and the test above would still be green
+    against whatever the constant now said.
+    """
+    assert mod.QBO_THROTTLE_EXCEEDED == 3001
+    assert THROTTLE_EXCEEDED_3001.error_code == mod.QBO_THROTTLE_EXCEEDED
+    # And it has to be inside the band that renders as ValidationException,
+    # or the exclusion is guarding an arm the exception never reaches.
+    assert 2000 <= mod.QBO_THROTTLE_EXCEEDED <= 4999
 
 
 def test_an_unrelated_quickbooks_failure_still_propagates(monkeypatch):

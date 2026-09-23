@@ -91,6 +91,17 @@ QBO_RETRY_BACKOFF_SECONDS = (1, 2)
 # runaway query cannot sit on a QBO connection indefinitely.
 QBO_MAX_PAGES_PER_WALK = 20
 
+# Rate limiting. QuickBooks answers a throttled request with HTTP 429 and
+# `code=3001, message=ThrottleExceeded`, and 3001 lands inside the SDK's
+# 2000-4999 band, so `handle_exceptions` renders it as a ValidationException
+# alongside the genuine "this id is wrong" faults. It is the one member of that
+# band on a by-id read that says nothing about the request's contents, so it is
+# named here rather than left to be caught by shape.
+#
+# Documented, not measured: reproducing it means deliberately exceeding Intuit's
+# rate limit against live books, which is not a read this repository will make.
+QBO_THROTTLE_EXCEEDED = 3001
+
 # Sort key every paged query is ordered by. STARTPOSITION indexes into an
 # ordering, so the ordering has to be one where a row written during a walk
 # cannot land in front of the cursor. Id is ascending and assigned at creation;
@@ -734,13 +745,27 @@ class QBOService:
         So the rule is structural instead. A by-id GET carries exactly ONE
         caller-supplied property — the id — and FastAPI has already coerced it
         to an int before this runs, so a non-integer never reaches QuickBooks.
-        Any validation failure here is therefore about the id, and an id
-        QuickBooks will not accept is a record the caller cannot have.
+        A validation failure about the REQUEST is therefore about the id, and an
+        id QuickBooks will not accept is a record the caller cannot have.
 
-        A SyncToken conflict (5310) cannot occur on this path: that is a write
-        concern and this issues a GET. Guarding against it would be defensive
-        code for a case that cannot arise. Validation errors on the WRITE paths
-        are untouched — this helper is only reached by by-id reads.
+        **`3001 ThrottleExceeded` is the exception, and it is the dangerous
+        one.** It sits in the same 2000-4999 band and arrives as the same
+        ValidationException, but it is not a complaint about the request at all
+        — it is a complaint about the rate of requests. Mapped to 404 it would
+        tell a caller that a record which exists does not, at exactly the moment
+        the service is under load, and a link validator acting on that answer
+        would retire a good record. It is re-raised untouched, so a throttled
+        read fails as a failure the way every other unmapped QBO error does.
+
+        `ReadMixin.get()` fetches `/v3/company/{id}/{entity}/{pk}` directly
+        rather than issuing a query, so the query-path codes (4000 parsing,
+        4001 validation, 4002 processing) cannot arise here — 3001 is the whole
+        of the non-request band on this path.
+
+        A SyncToken conflict (5310) cannot occur on this path either: that is a
+        write concern and this issues a GET. Guarding against it would be
+        defensive code for a case that cannot arise. Validation errors on the
+        WRITE paths are untouched — this helper is only reached by by-id reads.
 
         QuickBooks' own message rides along in the detail, per the rule that
         its words reach the caller rather than being summarised away.
@@ -753,6 +778,8 @@ class QBOService:
         except ObjectNotFoundException as exc:
             raise QboNotFound(f"{label} {entity_id} not found") from exc
         except ValidationException as exc:
+            if exc.error_code == QBO_THROTTLE_EXCEEDED:
+                raise
             raise QboNotFound(f"{label} {entity_id} not found: {exc}") from exc
 
     async def _fetch_page(
