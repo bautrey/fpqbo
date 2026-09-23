@@ -713,25 +713,37 @@ class QBOService:
         the `if not result:` guard in each router was unreachable and the
         404 it raises never fired (#37).
 
-        **QuickBooks answers with TWO different errors for the same condition,
-        and that is why this helper exists rather than one `except` clause.**
-        Measured against production on 2026-09-23, id 999999 on all 22 by-id
-        endpoints this service exposes:
+        **QuickBooks answers with at least THREE different errors for the same
+        condition**, which is why this catches a CLASS rather than a list of
+        codes. Measured against production on 2026-09-23, id 999999 on all 31
+        by-id endpoints this service exposes:
 
-            610 Object Not Found   20 endpoints
-            2010 Validation        2 endpoints — customers and vendors
+            610  ObjectNotFoundException   28 endpoints
+            2010 ValidationException        2 — customers and vendors
+                 "Request has invalid or unsupported property"
+            2500 ValidationException        1 — tax agencies
+                 "Invalid Reference Id : TaxAgency element id 999999 not found"
 
-        Catching only `ObjectNotFoundException` would have fixed twenty
-        endpoints and left the two a consumer had actually complained about
-        still returning 500.
+        The first cut of this fix hardcoded 610 and 2010, because the first
+        measurement covered 22 endpoints and was then applied to 31. Review
+        caught the gap and the remaining nine were measured; tax agencies
+        answered with a third code, so `/api/tax/agencies/{id}` would still
+        have returned 500. Enumerating codes is whack-a-mole, and this is the
+        evidence.
 
-        The 2010 mapping is safe here for a structural reason rather than an
-        empirical one. On a by-id GET the request carries exactly one
-        caller-supplied property, the id, and FastAPI has already coerced it to
-        an int before this runs — so "request has invalid or unsupported
-        property" can only be about the id, and an id QuickBooks will not
-        accept is a record the caller cannot have. A 2010 anywhere else in this
-        service still propagates as it always did.
+        So the rule is structural instead. A by-id GET carries exactly ONE
+        caller-supplied property — the id — and FastAPI has already coerced it
+        to an int before this runs, so a non-integer never reaches QuickBooks.
+        Any validation failure here is therefore about the id, and an id
+        QuickBooks will not accept is a record the caller cannot have.
+
+        A SyncToken conflict (5310) cannot occur on this path: that is a write
+        concern and this issues a GET. Guarding against it would be defensive
+        code for a case that cannot arise. Validation errors on the WRITE paths
+        are untouched — this helper is only reached by by-id reads.
+
+        QuickBooks' own message rides along in the detail, per the rule that
+        its words reach the caller rather than being summarised away.
         """
         def _get():
             return entity.get(entity_id, qb=client)
@@ -741,9 +753,7 @@ class QBOService:
         except ObjectNotFoundException as exc:
             raise QboNotFound(f"{label} {entity_id} not found") from exc
         except ValidationException as exc:
-            if exc.error_code == 2010:
-                raise QboNotFound(f"{label} {entity_id} not found") from exc
-            raise
+            raise QboNotFound(f"{label} {entity_id} not found: {exc}") from exc
 
     async def _fetch_page(
         self,

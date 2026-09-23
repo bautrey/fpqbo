@@ -9,15 +9,20 @@ n8n hit this building a validator for PartnerConnect's QBO links: a typo'd id
 pages an operator as though the API were down, which is a worse failure than
 the typo.
 
-**QuickBooks answers with two different errors for the same condition**, and
-that is the fact these tests exist to pin. Measured against production on
-2026-09-23, id 999999 across all 22 by-id endpoints this service exposes:
+**QuickBooks answers with at least three different errors for the same
+condition**, and that is the fact these tests exist to pin. Measured against
+production on 2026-09-23, id 999999 across all 31 by-id endpoints:
 
-    610 Object Not Found    20 endpoints
-    2010 Validation         2 endpoints — customers and vendors
+    610  ObjectNotFoundException   28 endpoints
+    2010 ValidationException        2 — customers and vendors
+    2500 ValidationException        1 — tax agencies
 
-Catching only `ObjectNotFoundException` would have fixed twenty endpoints and
-left the two the complaint was actually about still returning 500.
+The first cut of this fix hardcoded 610 and 2010 off a 22-endpoint
+measurement and applied it to 31. Review caught the gap; the remaining nine
+were measured and tax agencies answered with a third code, which would have
+left /api/tax/agencies/{id} still returning 500. Enumerating codes is
+whack-a-mole, so the helper catches the CLASS: on a by-id GET the id is the
+only caller-supplied property, so any validation failure is about the id.
 """
 
 import asyncio
@@ -52,9 +57,11 @@ INVALID_PROPERTY_2010 = ValidationException(
     error_code=2010,
     detail="Request has invalid or unsupported property",
 )
-# A validation error that is NOT about the id. Must still propagate.
-SYNC_TOKEN_5310 = ValidationException(
-    "Stale Object Error", error_code=5310, detail="Object version does not match"
+# Tax agencies. The third code, and the one that proved enumerating them fails.
+INVALID_REFERENCE_2500 = ValidationException(
+    "Invalid Reference Id",
+    error_code=2500,
+    detail="Invalid Reference Id : TaxAgency element id 999999 not found",
 )
 
 
@@ -95,14 +102,18 @@ def _run(coro):
 
 
 # ---------------------------------------------------------------------------
-# Both of QuickBooks' not-found shapes become a 404
+# All three of QuickBooks' not-found shapes become a 404
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "raised,label",
-    [(NOT_FOUND_610, "610-object-not-found"), (INVALID_PROPERTY_2010, "2010-invalid-property")],
-    ids=["610", "2010"],
+    [
+        (NOT_FOUND_610, "610-object-not-found"),
+        (INVALID_PROPERTY_2010, "2010-invalid-property"),
+        (INVALID_REFERENCE_2500, "2500-invalid-reference"),
+    ],
+    ids=["610", "2010", "2500"],
 )
 def test_a_missing_record_is_qbo_not_found(monkeypatch, raised, label):
     """The whole of #37. Before the fix both of these escaped as a 500."""
@@ -117,11 +128,12 @@ def test_a_missing_record_is_qbo_not_found(monkeypatch, raised, label):
     assert "Customer" in str(exc.value.detail)
 
 
-def test_the_2010_mapping_is_why_customers_and_vendors_needed_this(monkeypatch):
-    """Catching only ObjectNotFoundException would leave these two at 500.
+def test_catching_only_object_not_found_would_leave_three_endpoints_at_500(monkeypatch):
+    """Customers, vendors and tax agencies do not raise ObjectNotFoundException.
 
     This is the test that fails if somebody later "simplifies" the helper down
-    to a single except clause, which is the obvious-looking cleanup.
+    to a single `except ObjectNotFoundException`, which is the obvious-looking
+    cleanup and was the first cut of this very fix.
     """
     entity = _Entity(raises=INVALID_PROPERTY_2010)
     svc = _service(monkeypatch, entity)
@@ -131,23 +143,27 @@ def test_the_2010_mapping_is_why_customers_and_vendors_needed_this(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# What must NOT be swallowed
+# What survives into the 404, and what must NOT be swallowed
 # ---------------------------------------------------------------------------
 
 
-def test_a_validation_error_that_is_not_about_the_id_still_propagates(monkeypatch):
-    """5310 is a SyncToken mismatch — a real conflict, not a missing record.
+def test_quickbooks_own_words_survive_into_the_404(monkeypatch):
+    """The caller has to be able to tell WHY, not just that it failed.
 
-    Mapping every ValidationException to 404 would tell a caller that a record
-    it is holding does not exist, when the truth is somebody else edited it.
+    2500's message names the entity and the id outright — "TaxAgency element
+    id 999999 not found" — and that is more useful than anything this service
+    could synthesise, so it rides along in the detail rather than being
+    summarised away.
     """
-    entity = _Entity(raises=SYNC_TOKEN_5310)
+    entity = _Entity(raises=INVALID_REFERENCE_2500)
     svc = _service(monkeypatch, entity)
 
-    with pytest.raises(ValidationException) as exc:
-        _run(svc._fetch_by_id(entity, 42, client=object(), op="t", label="Bill"))
+    with pytest.raises(QboNotFound) as exc:
+        _run(svc._fetch_by_id(entity, 999999, client=object(), op="t", label="TaxAgency"))
 
-    assert exc.value.error_code == 5310
+    detail = str(exc.value.detail)
+    assert "999999" in detail
+    assert "Invalid Reference Id" in detail, f"QuickBooks' own text was dropped: {detail}"
 
 
 def test_an_unrelated_quickbooks_failure_still_propagates(monkeypatch):
