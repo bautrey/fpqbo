@@ -8,9 +8,16 @@ starlette==0.52.1
 uvicorn[standard]==0.41.0
 
 # Database
-sqlalchemy>=2.0.0
+# Upper bound is load-bearing, not tidiness. SQLAlchemy 2.1 changed the default
+# DBAPI for a bare `postgresql://` URL from psycopg2 to psycopg (v3), so the
+# first Render build after 2.1.1 shipped (2026-09-29) died on
+# `ModuleNotFoundError: No module named 'psycopg'` before app.main finished
+# importing. app/database.py now names psycopg2 in the URL so the choice does
+# not depend on this default; the bound keeps a major bump from arriving
+# unreviewed on a rebuild anyway. Lift it deliberately, with the driver.
+sqlalchemy>=2.0.0,<2.1
 alembic>=1.13.0
-psycopg2-binary>=2.9.0  # PostgreSQL driver
+psycopg2-binary>=2.9.0  # PostgreSQL driver (see the sqlalchemy bound above)
 
 # Configuration
 pydantic>=2.0.0
