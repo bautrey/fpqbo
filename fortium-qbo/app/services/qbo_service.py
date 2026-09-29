@@ -15,6 +15,7 @@ from quickbooks.exceptions import (
     QuickbooksException,
     SevereException,
     UnsupportedException,
+    ValidationException,
 )
 from quickbooks.objects.account import Account
 from quickbooks.objects.attachable import Attachable
@@ -89,6 +90,17 @@ QBO_RETRY_BACKOFF_SECONDS = (1, 2)
 # ~27,000-row bill ledger's largest realistic window and small enough that a
 # runaway query cannot sit on a QBO connection indefinitely.
 QBO_MAX_PAGES_PER_WALK = 20
+
+# Rate limiting. QuickBooks answers a throttled request with HTTP 429 and
+# `code=3001, message=ThrottleExceeded`, and 3001 lands inside the SDK's
+# 2000-4999 band, so `handle_exceptions` renders it as a ValidationException
+# alongside the genuine "this id is wrong" faults. It is the one member of that
+# band on a by-id read that says nothing about the request's contents, so it is
+# named here rather than left to be caught by shape.
+#
+# Documented, not measured: reproducing it means deliberately exceeding Intuit's
+# rate limit against live books, which is not a read this repository will make.
+QBO_THROTTLE_EXCEEDED = 3001
 
 # Sort key every paged query is ordered by. STARTPOSITION indexes into an
 # ordering, so the ordering has to be one where a row written during a walk
@@ -703,6 +715,78 @@ class QBOService:
             return None
         return total
 
+    async def _fetch_by_id(self, entity, entity_id, *, client, op: str, label: str):
+        """Read one record by id, or raise QboNotFound.
+
+        Every by-id read in this service used to surface a missing record as a
+        500 carrying QuickBooks' raw error text, because `ReadMixin.get()`
+        raises rather than returning a falsy object and nothing caught it — so
+        the `if not result:` guard in each router was unreachable and the
+        404 it raises never fired (#37).
+
+        **QuickBooks answers with at least THREE different errors for the same
+        condition**, which is why this catches a CLASS rather than a list of
+        codes. Measured against production on 2026-09-23, id 999999 on all 31
+        by-id endpoints this service exposes:
+
+            610  ObjectNotFoundException   28 endpoints
+            2010 ValidationException        2 — customers and vendors
+                 "Request has invalid or unsupported property"
+            2500 ValidationException        1 — tax agencies
+                 "Invalid Reference Id : TaxAgency element id 999999 not found"
+
+        The first cut of this fix hardcoded 610 and 2010, because the first
+        measurement covered 22 endpoints and was then applied to 31. Review
+        caught the gap and the remaining nine were measured; tax agencies
+        answered with a third code, so `/api/tax/agencies/{id}` would still
+        have returned 500. Enumerating codes is whack-a-mole, and this is the
+        evidence.
+
+        So the rule is structural instead. A by-id GET carries exactly ONE
+        caller-supplied property — the id — and FastAPI has already coerced it
+        to an int before this runs, so a non-integer never reaches QuickBooks.
+        A validation failure about the REQUEST is therefore about the id, and an
+        id QuickBooks will not accept is a record the caller cannot have.
+
+        **`3001 ThrottleExceeded` is the exception, and it is the dangerous
+        one.** It sits in the same 2000-4999 band and arrives as the same
+        ValidationException, but it is not a complaint about the request at all
+        — it is a complaint about the rate of requests. Mapped to 404 it would
+        tell a caller that a record which exists does not, at exactly the moment
+        the service is under load, and a link validator acting on that answer
+        would retire a good record. It is re-raised untouched, so a throttled
+        read fails as a failure the way every other unmapped QBO error does.
+
+        `ReadMixin.get()` fetches `/v3/company/{id}/{entity}/{pk}` directly
+        rather than issuing a query, so the query-path codes (4000 parsing,
+        4001 validation, 4002 processing) cannot arise here — 3001 is the whole
+        of the non-request band on this path.
+
+        A SyncToken conflict (5310) cannot occur on this path either: that is a
+        write concern and this issues a GET. Guarding against it would be
+        defensive code for a case that cannot arise. Validation errors on the
+        WRITE paths are untouched — this helper is only reached by by-id reads.
+
+        QuickBooks' own message rides along in the detail on ALL THREE, per the
+        rule that its words reach the caller rather than being summarised away.
+        The 610 arm used to drop it while the validation arm kept it, which made
+        the claim true of three endpoints and false of twenty-eight. Its text is
+        not always boilerplate either: tax codes and tax rates answer 610 with
+        "Object Not Found : TaxCode" and "Object Not Found : TaxRate", naming
+        the entity the caller asked about.
+        """
+        def _get():
+            return entity.get(entity_id, qb=client)
+
+        try:
+            return await self._to_thread_with_retry(_get, op=op)
+        except ObjectNotFoundException as exc:
+            raise QboNotFound(f"{label} {entity_id} not found: {exc}") from exc
+        except ValidationException as exc:
+            if exc.error_code == QBO_THROTTLE_EXCEEDED:
+                raise
+            raise QboNotFound(f"{label} {entity_id} not found: {exc}") from exc
+
     async def _fetch_page(
         self,
         entity,
@@ -835,16 +919,14 @@ class QBOService:
 
     async def get_invoice_by_id(
         self, company_id: int, invoice_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         """Get a specific invoice by ID."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Invoice.get(invoice_id, qb=client)
-
-        invoice = await self._to_thread_with_retry(_fetch, op="get_invoice_by_id")
-        return invoice.to_dict() if invoice else None
+        result = await self._fetch_by_id(
+            Invoice, invoice_id, client=client, op="get_invoice_by_id", label="Invoice"
+        )
+        return result.to_dict()
 
     async def get_invoice_by_doc_number(
         self, company_id: int, doc_number: str
@@ -881,16 +963,14 @@ class QBOService:
 
     async def get_customer_by_id(
         self, company_id: int, customer_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         """Get a specific customer by ID."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Customer.get(customer_id, qb=client)
-
-        customer = await self._to_thread_with_retry(_fetch, op="get_customer_by_id")
-        return customer.to_dict() if customer else None
+        result = await self._fetch_by_id(
+            Customer, customer_id, client=client, op="get_customer_by_id", label="Customer"
+        )
+        return result.to_dict()
 
     async def get_vendors(
         self,
@@ -913,16 +993,14 @@ class QBOService:
 
     async def get_vendor_by_id(
         self, company_id: int, vendor_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         """Get a specific vendor by ID."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Vendor.get(vendor_id, qb=client)
-
-        vendor = await self._to_thread_with_retry(_fetch, op="get_vendor_by_id")
-        return vendor.to_dict() if vendor else None
+        result = await self._fetch_by_id(
+            Vendor, vendor_id, client=client, op="get_vendor_by_id", label="Vendor"
+        )
+        return result.to_dict()
 
     async def create_customer(
         self, company_id: int, customer_data: dict[str, Any]
@@ -1203,16 +1281,14 @@ class QBOService:
 
     async def get_account_by_id(
         self, company_id: int, account_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         """Get a specific account by ID."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Account.get(account_id, qb=client)
-
-        account = await self._to_thread_with_retry(_fetch, op="get_account_by_id")
-        return account.to_dict() if account else None
+        result = await self._fetch_by_id(
+            Account, account_id, client=client, op="get_account_by_id", label="Account"
+        )
+        return result.to_dict()
 
     async def get_account_by_number(
         self, company_id: int, account_number: str
@@ -1250,16 +1326,14 @@ class QBOService:
 
     async def get_bill_by_id(
         self, company_id: int, bill_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         """Get a specific bill by ID."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Bill.get(bill_id, qb=client)
-
-        bill = await self._to_thread_with_retry(_fetch, op="get_bill_by_id")
-        return bill.to_dict() if bill else None
+        result = await self._fetch_by_id(
+            Bill, bill_id, client=client, op="get_bill_by_id", label="Bill"
+        )
+        return result.to_dict()
 
     async def delete_bill(
         self, company_id: int, bill_id: int
@@ -1437,16 +1511,14 @@ class QBOService:
 
     async def get_payment_by_id(
         self, company_id: int, payment_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         """Get a specific payment by ID."""
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Payment.get(payment_id, qb=client)
-
-        payment = await self._to_thread_with_retry(_fetch, op="get_payment_by_id")
-        return payment.to_dict() if payment else None
+        result = await self._fetch_by_id(
+            Payment, payment_id, client=client, op="get_payment_by_id", label="Payment"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # BillPayment
@@ -1472,15 +1544,13 @@ class QBOService:
 
     async def get_bill_payment_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return BillPayment.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_bill_payment_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            BillPayment, entity_id, client=client, op="get_bill_payment_by_id", label="BillPayment"
+        )
+        return result.to_dict()
 
     async def get_bill_payments_by_bill_id(
         self, company_id: int, bill_id: int
@@ -1788,15 +1858,13 @@ class QBOService:
 
     async def get_credit_memo_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return CreditMemo.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_credit_memo_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            CreditMemo, entity_id, client=client, op="get_credit_memo_by_id", label="CreditMemo"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # Deposit
@@ -1822,15 +1890,13 @@ class QBOService:
 
     async def get_deposit_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Deposit.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_deposit_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            Deposit, entity_id, client=client, op="get_deposit_by_id", label="Deposit"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # Estimate
@@ -1856,15 +1922,13 @@ class QBOService:
 
     async def get_estimate_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Estimate.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_estimate_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            Estimate, entity_id, client=client, op="get_estimate_by_id", label="Estimate"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # JournalEntry
@@ -1890,15 +1954,13 @@ class QBOService:
 
     async def get_journal_entry_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return JournalEntry.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_journal_entry_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            JournalEntry, entity_id, client=client, op="get_journal_entry_by_id", label="JournalEntry"
+        )
+        return result.to_dict()
 
     async def create_journal_entry(
         self, company_id: int, entry_data: dict[str, Any]
@@ -2059,15 +2121,13 @@ class QBOService:
 
     async def get_purchase_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Purchase.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_purchase_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            Purchase, entity_id, client=client, op="get_purchase_by_id", label="Purchase"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # PurchaseOrder
@@ -2093,15 +2153,13 @@ class QBOService:
 
     async def get_purchase_order_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return PurchaseOrder.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_purchase_order_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            PurchaseOrder, entity_id, client=client, op="get_purchase_order_by_id", label="PurchaseOrder"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # RefundReceipt
@@ -2127,15 +2185,13 @@ class QBOService:
 
     async def get_refund_receipt_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return RefundReceipt.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_refund_receipt_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            RefundReceipt, entity_id, client=client, op="get_refund_receipt_by_id", label="RefundReceipt"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # SalesReceipt
@@ -2161,15 +2217,13 @@ class QBOService:
 
     async def get_sales_receipt_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return SalesReceipt.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_sales_receipt_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            SalesReceipt, entity_id, client=client, op="get_sales_receipt_by_id", label="SalesReceipt"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # Transfer
@@ -2195,15 +2249,13 @@ class QBOService:
 
     async def get_transfer_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Transfer.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_transfer_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            Transfer, entity_id, client=client, op="get_transfer_by_id", label="Transfer"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # VendorCredit
@@ -2229,15 +2281,13 @@ class QBOService:
 
     async def get_vendor_credit_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return VendorCredit.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_vendor_credit_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            VendorCredit, entity_id, client=client, op="get_vendor_credit_by_id", label="VendorCredit"
+        )
+        return result.to_dict()
 
     async def create_vendor_credit(
         self, company_id: int, credit_data: dict[str, Any]
@@ -2422,15 +2472,13 @@ class QBOService:
 
     async def get_item_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Item.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_item_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            Item, entity_id, client=client, op="get_item_by_id", label="Item"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # Employee
@@ -2457,15 +2505,13 @@ class QBOService:
 
     async def get_employee_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Employee.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_employee_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            Employee, entity_id, client=client, op="get_employee_by_id", label="Employee"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # Department
@@ -2492,15 +2538,13 @@ class QBOService:
 
     async def get_department_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Department.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_department_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            Department, entity_id, client=client, op="get_department_by_id", label="Department"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # TimeActivity
@@ -2526,15 +2570,13 @@ class QBOService:
 
     async def get_time_activity_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return TimeActivity.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_time_activity_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            TimeActivity, entity_id, client=client, op="get_time_activity_by_id", label="TimeActivity"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # CompanyInfo
@@ -2593,15 +2635,13 @@ class QBOService:
 
     async def get_tax_agency_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return TaxAgency.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_tax_agency_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            TaxAgency, entity_id, client=client, op="get_tax_agency_by_id", label="TaxAgency"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # TaxCode
@@ -2627,15 +2667,13 @@ class QBOService:
 
     async def get_tax_code_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return TaxCode.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_tax_code_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            TaxCode, entity_id, client=client, op="get_tax_code_by_id", label="TaxCode"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # TaxRate
@@ -2661,15 +2699,13 @@ class QBOService:
 
     async def get_tax_rate_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return TaxRate.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_tax_rate_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            TaxRate, entity_id, client=client, op="get_tax_rate_by_id", label="TaxRate"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # CompanyCurrency
@@ -2695,15 +2731,13 @@ class QBOService:
 
     async def get_company_currency_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return CompanyCurrency.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_company_currency_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            CompanyCurrency, entity_id, client=client, op="get_company_currency_by_id", label="CompanyCurrency"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # ExchangeRate (list only - no get by ID)
@@ -2752,15 +2786,13 @@ class QBOService:
 
     async def get_payment_method_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return PaymentMethod.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_payment_method_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            PaymentMethod, entity_id, client=client, op="get_payment_method_by_id", label="PaymentMethod"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # Term
@@ -2787,15 +2819,13 @@ class QBOService:
 
     async def get_term_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Term.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_term_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            Term, entity_id, client=client, op="get_term_by_id", label="Term"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # TrackingClass
@@ -2822,15 +2852,13 @@ class QBOService:
 
     async def get_class_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return TrackingClass.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_class_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            TrackingClass, entity_id, client=client, op="get_class_by_id", label="Class"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # CustomerType
@@ -2856,15 +2884,13 @@ class QBOService:
 
     async def get_customer_type_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return CustomerType.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_customer_type_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            CustomerType, entity_id, client=client, op="get_customer_type_by_id", label="CustomerType"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # Attachable
@@ -2890,15 +2916,13 @@ class QBOService:
 
     async def get_attachable_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return Attachable.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_attachable_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            Attachable, entity_id, client=client, op="get_attachable_by_id", label="Attachment"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # RecurringTransaction
@@ -2938,15 +2962,13 @@ class QBOService:
 
     async def get_recurring_transaction_by_id(
         self, company_id: int, entity_id: int
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         company = self._get_company(company_id)
         client = self._get_client(company)
-
-        def _fetch():
-            return RecurringTransaction.get(entity_id, qb=client)
-
-        result = await self._to_thread_with_retry(_fetch, op="get_recurring_transaction_by_id")
-        return result.to_dict() if result else None
+        result = await self._fetch_by_id(
+            RecurringTransaction, entity_id, client=client, op="get_recurring_transaction_by_id", label="RecurringTransaction"
+        )
+        return result.to_dict()
 
     # -------------------------------------------------------------------------
     # Reports (Direct API - SDK doesn't support QBO Reports)
