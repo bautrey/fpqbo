@@ -18,6 +18,41 @@ class Base(DeclarativeBase):
     pass
 
 
+def resolve_database_url(url: str) -> str:
+    """Name the PostgreSQL driver explicitly instead of inheriting a default.
+
+    A bare `postgresql://` URL does not say which DBAPI to load — SQLAlchemy
+    picks one, and on 2026-09-29 it changed its mind. SQLAlchemy 2.1 made
+    `psycopg` (v3) the default for that scheme where 2.0 had used `psycopg2`,
+    and `requirements.txt` carried `sqlalchemy>=2.0.0` against
+    `psycopg2-binary`, so the first Render build after 2.1.1 shipped resolved a
+    driver that was not installed:
+
+        File "sqlalchemy/dialects/postgresql/psycopg.py", line 497, in import_dbapi
+            import psycopg
+        ModuleNotFoundError: No module named 'psycopg'
+
+    The container never finished importing `app.main`, so the deploy failed and
+    the previous release kept serving. Nothing about the application changed;
+    the driver underneath it did.
+
+    Rewriting the scheme here is the durable half of the fix. The pin in
+    requirements.txt stops the surprise; this stops the *class* of surprise, by
+    removing SQLAlchemy's freedom to choose. It also means the pin can be
+    relaxed deliberately later without this breaking again.
+
+    `postgresql+psycopg2://` and every other explicit scheme is left alone, as
+    is sqlite.
+    """
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + url[len("postgresql://"):]
+    if url.startswith("postgres://"):
+        # Heroku-style alias. SQLAlchemy dropped it in 1.4 and Render hands it
+        # out for some databases, so it is normalised rather than left to fail.
+        return "postgresql+psycopg2://" + url[len("postgres://"):]
+    return url
+
+
 def _get_engine_kwargs() -> dict:
     """Get database engine kwargs based on database URL."""
     if settings.database_url.startswith("sqlite"):
@@ -35,7 +70,7 @@ def _get_engine_kwargs() -> dict:
 
 # Create engine
 engine = create_engine(
-    settings.database_url,
+    resolve_database_url(settings.database_url),
     echo=settings.debug,
     **_get_engine_kwargs(),
 )
