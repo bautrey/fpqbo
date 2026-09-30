@@ -125,3 +125,19 @@ def test_the_engine_this_service_builds_uses_psycopg2_for_a_bare_url():
         "create_engine is not being handed the resolved URL, so the rewrite "
         "cannot reach the engine"
     )
+
+
+def test_alembic_hands_its_engine_the_resolved_url_too():
+    """Alembic builds its own engine from DATABASE_URL, outside app.database.
+
+    It does not run on deploy, so it could not have caused the outage. It would
+    reproduce it for anyone running a migration by hand once the <2.1 pin is
+    lifted, which is the moment the rewrite exists to make safe.
+    """
+    import pathlib
+
+    env = pathlib.Path(__file__).resolve().parents[1] / "alembic" / "env.py"
+    src = env.read_text()
+    assert "resolve_database_url(settings.database_url)" in src, (
+        "alembic/env.py sets sqlalchemy.url from the raw DATABASE_URL"
+    )
