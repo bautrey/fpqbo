@@ -7,6 +7,7 @@ we expect from the request payload.
 """
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -331,6 +332,38 @@ def test_create_bill_payment_omits_check_payment_when_null(monkeypatch):
 
     bp = sentinel.captured
     assert bp.CheckPayment is None
+
+
+def test_create_bill_payment_keeps_the_callers_txn_date(monkeypatch):
+    """#50: a payment recorded after the fact keeps the date it was paid.
+
+    payouts posted TxnDate 2026-09-11 and QuickBooks stored BillPayment 96471
+    on 2026-09-23, the day it was created, because TxnDate never reached the
+    request. Asserted on the serialized body, since that is what QBO receives.
+    """
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    sentinel = _Sentinel()
+    monkeypatch.setattr(
+        qbo_service_module.BillPayment, "save",
+        lambda self, qb=None: sentinel(self),
+        raising=True,
+    )
+
+    payload = {
+        "VendorRef": {"value": "1047"},
+        "TxnDate": "2026-09-11",
+        "TotalAmt": 95.76,
+        "PayType": "Check",
+        "Line": [],
+    }
+
+    _run(svc.create_bill_payment(1, payload))
+
+    sent = json.loads(sentinel.captured.to_json())
+    assert sent.get("TxnDate") == "2026-09-11"
 
 
 def test_bills_router_has_post_route():
