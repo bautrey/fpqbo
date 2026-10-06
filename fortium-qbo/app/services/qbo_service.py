@@ -1673,6 +1673,9 @@ class QBOService:
             bp.TotalAmt = payment_data["TotalAmt"]
             bp.PrivateNote = payment_data.get("PrivateNote", "")
             bp.DocNumber = payment_data.get("DocNumber", "")
+            # Without it QBO dates the payment the day it is created (#50).
+            if "TxnDate" in payment_data:
+                bp.TxnDate = payment_data["TxnDate"]
 
             if payment_data.get("VendorRef"):
                 ref = Ref()
