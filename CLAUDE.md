@@ -28,7 +28,7 @@ The `fortium-qbo/` directory contains a FastAPI service deployed at **https://qb
 All `/api/*` endpoints require an `X-API-Key` header. Keys are stored in macOS Keychain:
 
 ```bash
-# US company (FOR-138) — "Pipeline" key, works for most queries
+# US company (FOR-138), read/write, for local scripts and sessions on this Mac
 security find-generic-password -a "burkestudio" -s "fpqbo-api-key-us" -w
 
 # Canada company (FOR-971)
@@ -39,7 +39,21 @@ security find-generic-password -a "burkestudio" -s "fpqbo-api-key-for336" -w
 
 # Autrey Investments LLC (AUT-691)
 security find-generic-password -a "burkestudio" -s "fpqbo-api-key-aut691" -w
+
+# Sandbox BUR-015 (company_id 5), read/write, for testing write operations
+security find-generic-password -a "burkestudio" -s "fpqbo-api-key-sandbox" -w
 ```
+
+Each deployed caller has its own key, so a leak can be revoked without taking the others down. The shared US "Pipeline" key leaked and was revoked on 2026-10-09.
+
+| Caller | Where it reads the key | Keychain copy | Access |
+|--------|------------------------|---------------|--------|
+| pipeline (Render `srv-d5dcep1r0fns73agnu20`) | env `FPQBO_API_KEY` | `fpqbo-api-key-pipeline` | read-only |
+| fortiumtax-api (Render `srv-d7ru8hflk1mc73ddeep0`) | env `FPQBO_API_KEY` | `fpqbo-api-key-fortiumtax` | read/write |
+| FortiumHermes (AWS) | SSM `/fortiumhermes/extractors/fpqbo-api-key` | `fpqbo-api-key-hermes` | read-only |
+| payouts | its own "Payouts" / "Payouts - Canada" keys | — | read/write |
+
+Before revoking a key, look for its callers in Render env vars, AWS SSM, n8n credentials and `~/projects`, not only on this machine.
 
 **Usage:**
 ```bash
