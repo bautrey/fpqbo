@@ -51,9 +51,10 @@ Each deployed caller has its own key, so a leak can be revoked without taking th
 | pipeline (Render `srv-d5dcep1r0fns73agnu20`) | env `FPQBO_API_KEY` | `fpqbo-api-key-pipeline` | read-only |
 | fortiumtax-api (Render `srv-d7ru8hflk1mc73ddeep0`) | env `FPQBO_API_KEY` | `fpqbo-api-key-fortiumtax` | read/write |
 | FortiumHermes (AWS) | SSM `/fortiumhermes/extractors/fpqbo-api-key` | `fpqbo-api-key-hermes` | read-only |
+| PartnerConnect (UAT + prod, one key) | AWS Secrets Manager `partner-connect-uat` / `partner-connect-prod`, key `fpqbo-api-key` | `fpqbo-api-key-partnerconnect` | read-only |
 | payouts | its own "Payouts" / "Payouts - Canada" keys | — | read/write |
 
-Before revoking a key, look for its callers in Render env vars, AWS SSM, n8n credentials and `~/projects`, not only on this machine.
+Before revoking a key, look for its callers in Render env vars, AWS SSM, AWS Secrets Manager, n8n credentials and `~/projects`, not only on this machine. PartnerConnect was missed on 2026-10-09 because nobody searched Secrets Manager.
 
 **Usage:**
 ```bash
