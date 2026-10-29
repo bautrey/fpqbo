@@ -132,7 +132,7 @@ All list endpoints also have `GET /{id}` variants for fetching by ID (except exc
 ### Capital Accounts
 - **311000** - Partner Contributions - Class A (equity parent, Id 82)
 - **311xxx** - Individual partner capital accounts (children of 311000)
-- **311500** - Partner Distributions (separate equity parent)
+- **311500** - Partner Distributions (separate equity account, no sub-accounts)
 - **310000** - Paid-In Capital or Surplus (equity parent; holds only 310500 Additional Paid-In Capital, no partner accounts)
 - **100000** - Capital - Chase Bus Savings (6969) (coverage)
 - **105001** - Capital - JPMorgan 100% US Treasury MM (coverage)
@@ -140,8 +140,8 @@ All list endpoints also have `GET /{id}` variants for fetching by ID (except exc
 ### Withholding Accounts
 - **219500** - Additional Partner Withholding (liability parent)
 - **260xxx** - Individual partner withholding accounts (children of 219500)
-- **101000** - Withholding Chase Checking (coverage)
-- **105002** - Withholding JPMorgan MM (coverage)
+- **101000** - Withholding - Chase Checking 2358 (coverage)
+- **105002** - Withholding - JPMorgan US GOV MM (coverage)
 
 ### Other Accounts
 - **214000** - GP Payable
