@@ -130,10 +130,12 @@ All list endpoints also have `GET /{id}` variants for fetching by ID (except exc
 ## Account Structure (Fortium Partners US)
 
 ### Capital Accounts
-- **310000** - Paid-In Capital (liability parent)
-- **311xxx** - Individual partner capital accounts (children of 310000)
-- **100000** - Capital Chase Checking (coverage)
-- **105001** - Capital JPMorgan MM (coverage)
+- **311000** - Partner Contributions - Class A (equity parent, Id 82)
+- **311xxx** - Individual partner capital accounts (children of 311000)
+- **311500** - Partner Distributions (separate equity parent)
+- **310000** - Paid-In Capital or Surplus (equity parent; holds only 310500 Additional Paid-In Capital, no partner accounts)
+- **100000** - Capital - Chase Bus Savings (6969) (coverage)
+- **105001** - Capital - JPMorgan 100% US Treasury MM (coverage)
 
 ### Withholding Accounts
 - **219500** - Additional Partner Withholding (liability parent)
@@ -142,8 +144,8 @@ All list endpoints also have `GET /{id}` variants for fetching by ID (except exc
 - **105002** - Withholding JPMorgan MM (coverage)
 
 ### Other Accounts
-- **214000** - GP Distribution Owed
-- **104000** - Operating Chase Checking
+- **214000** - GP Payable
+- **104000** - Operating - TOTAL BUS CHK (3103)
 
 ## Development
 
