@@ -81,10 +81,13 @@ async def create_payment(
 ) -> dict[str, Any]:
     """Record a client payment in QBO, applied to one or more invoices.
 
-    Always creates; an `Id` or `SyncToken` in the body is ignored.
+    Always creates. 400, with nothing sent to QBO, for any field outside the
+    example's (including `Id` and `SyncToken`), a missing `CustomerRef`,
+    `TotalAmt` or `Line`, or a line with no `LinkedTxn`.
     `DepositToAccountRef` must be a Bank or Other Current Asset account, or
-    omitted for Undeposited Funds. QBO's refusal text arrives in the 500's
-    `detail`.
+    omitted for Undeposited Funds; also accepted are `PaymentRefNum`,
+    `PaymentMethodRef`, `ARAccountRef` and `ExchangeRate`. QBO's refusal text
+    arrives in the 500's `detail`.
 
     Example body:
     {

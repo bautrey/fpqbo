@@ -65,7 +65,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.qbo_company import QboCompany
-from app.exceptions import QboCompanyDisconnected, QboNotFound, QboUnavailable
+from app.exceptions import QboBadPayload, QboCompanyDisconnected, QboNotFound, QboUnavailable
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
 from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
 from app.utils.token_status import apply_token_expiries
@@ -1525,9 +1525,13 @@ class QBOService:
     ) -> dict[str, Any]:
         """Create a client Payment in QBO, applied to invoices via LinkedTxn.
 
-        Only the fields below are copied. `Id` and `SyncToken` never are: the
-        SDK's `save()` issues an UPDATE whenever `Id` is set, so passing the
-        body through whole would let a create overwrite an existing payment.
+        Only the fields below are accepted, and any other key is refused
+        rather than dropped: a misspelled `DepositToAccountRef` would
+        otherwise land the money in Undeposited Funds behind a 201. That
+        includes `Id` and `SyncToken`, because the SDK's `save()` issues an
+        UPDATE whenever `Id` is set. Every line must link at least one
+        transaction; without one QBO books an unapplied customer credit and
+        the invoice stays open.
 
         `DepositToAccountRef` must be a Bank or Other Current Asset account;
         QBO refuses any other type, and its refusal text reaches the caller.
@@ -1542,24 +1546,38 @@ class QBOService:
 
         Returns:
             Created Payment as dict
+        Raises:
+            QboBadPayload: an unaccepted key, a missing CustomerRef / TotalAmt /
+                Line, or a line linking no transaction. Nothing is sent to QBO.
         """
+        scalar_fields = ("TotalAmt", "TxnDate", "PrivateNote", "PaymentRefNum", "ExchangeRate")
+        ref_fields = ("CustomerRef", "DepositToAccountRef", "PaymentMethodRef", "ARAccountRef")
+        unknown = sorted(set(payment_data) - set(scalar_fields) - set(ref_fields) - {"Line"})
+        if unknown:
+            raise QboBadPayload(f"Payment fields not accepted: {', '.join(unknown)}")
+        missing = [f for f in ("CustomerRef", "TotalAmt", "Line") if not payment_data.get(f)]
+        if missing:
+            raise QboBadPayload(f"Payment requires: {', '.join(missing)}")
+        if any(not line.get("LinkedTxn") for line in payment_data["Line"]):
+            raise QboBadPayload("Every Payment line needs a LinkedTxn naming the invoice it pays")
+
         company = self._get_company(company_id)
         client = self._get_client(company)
 
         def _create():
             p = Payment()
-            for field in ("TotalAmt", "TxnDate", "PrivateNote", "PaymentRefNum", "ExchangeRate"):
+            for field in scalar_fields:
                 if field in payment_data:
                     setattr(p, field, payment_data[field])
 
-            for ref_field in ("CustomerRef", "DepositToAccountRef", "PaymentMethodRef", "ARAccountRef"):
+            for ref_field in ref_fields:
                 if payment_data.get(ref_field):
                     ref = Ref()
                     ref.value = str(payment_data[ref_field]["value"])
                     ref.name = payment_data[ref_field].get("name")
                     setattr(p, ref_field, ref)
 
-            for line_data in payment_data.get("Line", []):
+            for line_data in payment_data["Line"]:
                 line = PaymentLine()
                 line.Amount = line_data["Amount"]
                 for txn_data in line_data.get("LinkedTxn", []):

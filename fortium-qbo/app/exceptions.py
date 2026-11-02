@@ -48,10 +48,22 @@ unaffected.
 from fastapi import HTTPException
 
 __all__ = [
+    "QboBadPayload",
     "QboCompanyDisconnected",
     "QboNotFound",
     "QboUnavailable",
 ]
+
+
+class QboBadPayload(HTTPException):
+    """The caller's request body cannot be sent to QBO as written.
+
+    Raised before any QBO call, so nothing was written. Not `ValueError`,
+    which this module keeps out of the service as an ambiguous channel.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=400, detail=detail)
 
 
 class QboNotFound(HTTPException):

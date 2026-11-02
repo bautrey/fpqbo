@@ -3,8 +3,10 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
+from app.exceptions import QboBadPayload
 from app.services import qbo_service as qbo_service_module
 from app.services.qbo_service import QBOService
 
@@ -81,16 +83,15 @@ def test_create_payment_carries_every_field_payouts_sends(monkeypatch):
     assert result["Id"] == "9999"
 
 
-def test_create_payment_never_turns_into_an_update(monkeypatch):
+@pytest.mark.parametrize("key", ["Id", "SyncToken"])
+def test_create_payment_never_turns_into_an_update(monkeypatch, key):
     """The SDK's save() UPDATES when Id is set. A body carrying Id or
-    SyncToken must still create, never overwrite an existing payment."""
+    SyncToken is refused, so a create can never overwrite an existing payment."""
     svc, sentinel = _stub(monkeypatch)
 
-    _run(svc.create_payment(1, {**PAYOUTS_BODY, "Id": "84286", "SyncToken": "3"}))
-
-    assert sentinel.calls == 1
-    assert not sentinel.id_at_save
-    assert sentinel.sync_token_at_save in (0, None, "0")
+    with pytest.raises(QboBadPayload, match=key):
+        _run(svc.create_payment(1, {**PAYOUTS_BODY, key: "84286"}))
+    assert sentinel.calls == 0
 
 
 def test_create_payment_optional_refs(monkeypatch):
@@ -114,12 +115,72 @@ def test_create_payment_optional_refs(monkeypatch):
 def test_create_payment_minimal_body_leaves_refs_unset(monkeypatch):
     svc, sentinel = _stub(monkeypatch)
 
-    _run(svc.create_payment(1, {"CustomerRef": {"value": "1"}, "TotalAmt": 5}))
+    _run(svc.create_payment(1, {
+        "CustomerRef": {"value": "1"},
+        "TotalAmt": 5,
+        "Line": [{"Amount": 5, "LinkedTxn": [{"TxnId": "13", "TxnType": "Invoice"}]}],
+    }))
 
     p = sentinel.captured
     assert p.DepositToAccountRef is None
     assert p.PaymentMethodRef is None
-    assert p.Line == []
+    assert len(p.Line) == 1
+
+
+@pytest.mark.parametrize("bad_key", ["DepositToAcountRef", "CurrencyRef", "TaxExemptionRef"])
+def test_create_payment_rejects_a_field_it_would_drop(monkeypatch, bad_key):
+    """A misspelled DepositToAccountRef would otherwise be dropped and the
+    payment land in Undeposited Funds behind a 201."""
+    svc, sentinel = _stub(monkeypatch)
+
+    with pytest.raises(QboBadPayload, match=bad_key):
+        _run(svc.create_payment(1, {**PAYOUTS_BODY, bad_key: {"value": "35"}}))
+    assert sentinel.calls == 0
+
+
+@pytest.mark.parametrize("missing", ["CustomerRef", "TotalAmt", "Line"])
+def test_create_payment_requires_customer_amount_and_lines(monkeypatch, missing):
+    svc, sentinel = _stub(monkeypatch)
+    body = {k: v for k, v in PAYOUTS_BODY.items() if k != missing}
+
+    with pytest.raises(QboBadPayload, match=missing):
+        _run(svc.create_payment(1, body))
+    assert sentinel.calls == 0
+
+
+@pytest.mark.parametrize("lines", [
+    [],
+    [{"Amount": 12500.00}],
+    [{"Amount": 12500.00, "LinkedTxn": []}],
+])
+def test_create_payment_refuses_a_payment_applied_to_no_invoice(monkeypatch, lines):
+    """Without a LinkedTxn QBO books an unapplied credit on the customer, and
+    the invoice the caller meant to pay stays open."""
+    svc, sentinel = _stub(monkeypatch)
+
+    # An empty Line[] is refused as missing; a line without links names LinkedTxn.
+    with pytest.raises(QboBadPayload, match="requires: Line|LinkedTxn"):
+        _run(svc.create_payment(1, {**PAYOUTS_BODY, "Line": lines}))
+    assert sentinel.calls == 0
+
+
+def test_post_payments_answers_400_for_a_dropped_field():
+    from app.services.qbo_service import QBOService as _Real
+
+    svc = _Real.__new__(_Real)
+    svc.db = None
+    svc._clients = {}
+    svc._get_company = lambda _cid: SimpleNamespace(realm_id="r1")
+    svc._get_client = lambda _co: SimpleNamespace()
+
+    app, client = _client(svc)
+    try:
+        resp = client.post("/payments/?company_id=1", json={**PAYOUTS_BODY, "DepositToAcountRef": {"value": "35"}})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 400
+    assert "DepositToAcountRef" in resp.json()["detail"]
 
 
 def test_create_payment_is_never_retried(monkeypatch):
