@@ -2,11 +2,12 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import verify_api_key
+from app.routers._qbo_write import run_qbo_write
 from app.services.qbo_service import QBOService, get_qbo_service
 from app.utils.paging import (
     MAX_RESULTS_DESCRIPTION,
@@ -70,6 +71,39 @@ async def list_payments(
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
     apply_paging_headers(response, page)
     return page.rows
+
+
+@router.post("/", response_model=dict[str, Any], status_code=201)
+async def create_payment(
+    company_id: int = Query(..., description="QBO company ID"),
+    payment_data: dict[str, Any] = Body(..., description="Payment data"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Record a client payment in QBO, applied to one or more invoices.
+
+    Always creates. 400, with nothing sent to QBO, for any field outside the
+    example's (including `Id` and `SyncToken`), a missing `CustomerRef`,
+    `TotalAmt` or `Line`, or a line with no `LinkedTxn`.
+    `DepositToAccountRef` must be a Bank or Other Current Asset account, or
+    omitted for Undeposited Funds; also accepted are `PaymentRefNum`,
+    `PaymentMethodRef`, `ARAccountRef` and `ExchangeRate`. QBO's refusal text
+    arrives in the 500's `detail`.
+
+    Example body:
+    {
+        "CustomerRef": {"value": "1400"},
+        "TotalAmt": 12500.00,
+        "TxnDate": "2026-10-28",
+        "DepositToAccountRef": {"value": "4"},
+        "PrivateNote": "payouts:zrg-collection:abc123",
+        "Line": [
+            {"Amount": 12500.00, "LinkedTxn": [{"TxnId": "97001", "TxnType": "Invoice"}]}
+        ]
+    }
+    """
+    return await run_qbo_write(
+        qbo.create_payment(company_id, payment_data), entity="payment"
+    )
 
 
 @router.get("/{payment_id}", response_model=dict[str, Any])

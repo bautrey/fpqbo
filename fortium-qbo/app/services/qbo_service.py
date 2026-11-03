@@ -44,7 +44,7 @@ from quickbooks.objects.journalentry import (
     JournalEntryLine,
     JournalEntryLineDetail,
 )
-from quickbooks.objects.payment import Payment
+from quickbooks.objects.payment import Payment, PaymentLine
 from quickbooks.objects.paymentmethod import PaymentMethod
 from quickbooks.objects.preferences import Preferences
 from quickbooks.objects.purchase import Purchase
@@ -65,7 +65,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.qbo_company import QboCompany
-from app.exceptions import QboCompanyDisconnected, QboNotFound, QboUnavailable
+from app.exceptions import QboBadPayload, QboCompanyDisconnected, QboNotFound, QboUnavailable
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
 from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
 from app.utils.token_status import apply_token_expiries
@@ -1518,6 +1518,80 @@ class QBOService:
         result = await self._fetch_by_id(
             Payment, payment_id, client=client, op="get_payment_by_id", label="Payment"
         )
+        return result.to_dict()
+
+    async def create_payment(
+        self, company_id: int, payment_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a client Payment in QBO, applied to invoices via LinkedTxn.
+
+        Only the fields below are accepted, and any other key is refused
+        rather than dropped: a misspelled `DepositToAccountRef` would
+        otherwise land the money in Undeposited Funds behind a 201. That
+        includes `Id` and `SyncToken`, because the SDK's `save()` issues an
+        UPDATE whenever `Id` is set. Every line must link at least one
+        transaction; without one QBO books an unapplied customer credit and
+        the invoice stays open.
+
+        `DepositToAccountRef` must be a Bank or Other Current Asset account;
+        QBO refuses any other type, and its refusal text reaches the caller.
+        Omitted, QBO deposits to Undeposited Funds.
+
+        Args:
+            company_id: QBO company ID
+            payment_data: Dict with CustomerRef, TotalAmt, TxnDate,
+                DepositToAccountRef, PrivateNote, PaymentRefNum,
+                PaymentMethodRef, ARAccountRef, ExchangeRate, and Line[]
+                (each line: Amount, LinkedTxn[] of {TxnId, TxnType}).
+
+        Returns:
+            Created Payment as dict
+        Raises:
+            QboBadPayload: an unaccepted key, a missing CustomerRef / TotalAmt /
+                Line, or a line linking no transaction. Nothing is sent to QBO.
+        """
+        scalar_fields = ("TotalAmt", "TxnDate", "PrivateNote", "PaymentRefNum", "ExchangeRate")
+        ref_fields = ("CustomerRef", "DepositToAccountRef", "PaymentMethodRef", "ARAccountRef")
+        unknown = sorted(set(payment_data) - set(scalar_fields) - set(ref_fields) - {"Line"})
+        if unknown:
+            raise QboBadPayload(f"Payment fields not accepted: {', '.join(unknown)}")
+        missing = [f for f in ("CustomerRef", "TotalAmt", "Line") if not payment_data.get(f)]
+        if missing:
+            raise QboBadPayload(f"Payment requires: {', '.join(missing)}")
+        if any(not line.get("LinkedTxn") for line in payment_data["Line"]):
+            raise QboBadPayload("Every Payment line needs a LinkedTxn naming the invoice it pays")
+
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            p = Payment()
+            for field in scalar_fields:
+                if field in payment_data:
+                    setattr(p, field, payment_data[field])
+
+            for ref_field in ref_fields:
+                if payment_data.get(ref_field):
+                    ref = Ref()
+                    ref.value = str(payment_data[ref_field]["value"])
+                    ref.name = payment_data[ref_field].get("name")
+                    setattr(p, ref_field, ref)
+
+            for line_data in payment_data["Line"]:
+                line = PaymentLine()
+                line.Amount = line_data["Amount"]
+                for txn_data in line_data.get("LinkedTxn", []):
+                    txn = LinkedTxn()
+                    txn.TxnId = str(txn_data["TxnId"])
+                    txn.TxnType = txn_data["TxnType"]
+                    line.LinkedTxn.append(txn)
+                p.Line.append(line)
+
+            return p.save(qb=client)
+
+        # asyncio.to_thread, not _to_thread_with_retry: a create is not
+        # idempotent, and a retried POST could record the payment twice.
+        result = await asyncio.to_thread(_create)
         return result.to_dict()
 
     # -------------------------------------------------------------------------
