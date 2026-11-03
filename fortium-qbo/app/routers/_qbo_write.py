@@ -10,7 +10,7 @@ to 404 and the uniform ValueError→400 below would have clobbered it. That
 hazard ended with #15 — not-found is `QboNotFound`, an `HTTPException` the
 guard re-raises untouched — so those endpoints could adopt this helper and
 would gain the 500 logging by doing so. They have not been converted; new
-ones (`POST /bill-payments/{id}/void`) use it.
+ones (`POST /bill-payments/{id}/void`, `POST /payments/{id}/void`) use it.
 
 Since #15 the service signals its own conditions with typed exceptions —
 ``QboNotFound`` (404), ``QboCompanyDisconnected`` (409), ``QboUnavailable``

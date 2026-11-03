@@ -55,14 +55,20 @@ class _FakePayment:
         cls.fetched_ids.append(entity_id)
         if not cls.existing:
             raise ObjectNotFoundException("QB Object Not Found Exception", error_code=610)
-        return cls._instance
+        # A fresh object per read, like the SDK. void() changes only the
+        # server-side state, so a result built from the pre-void object would
+        # still show the old total: dropping the re-read goes red.
+        fresh = _FakePayment(cls._instance.Id)
+        fresh.__dict__.update(cls._instance.__dict__)
+        return fresh
 
     def void(self, qb=None):
         type(self).calls.append("void")
-        self.TotalAmt = 0.0
-        self.Line = []
-        self.PrivateNote = "Voided"
-        self.SyncToken = str(int(self.SyncToken) + 1)
+        server = type(self)._instance
+        server.TotalAmt = 0.0
+        server.Line = []
+        server.PrivateNote = "Voided"
+        server.SyncToken = str(int(server.SyncToken) + 1)
 
     def to_dict(self):
         return {
@@ -90,7 +96,7 @@ def _svc(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_voiding_zeroes_the_payment_and_reopens_nothing_silently(monkeypatch):
+def test_voiding_returns_the_re_read_voided_payment(monkeypatch):
     svc = _svc(monkeypatch)
 
     result = _run(svc.void_payment(company_id=5, entity_id=404))
