@@ -120,6 +120,7 @@ All `/api/*` endpoints require `X-API-Key` header.
 | POST | `/api/bill-payments/` | Create a bill payment (also applies VendorCredit via `LinkedTxn`) |
 | POST | `/api/bill-payments/{id}/void` | Void a bill payment (idempotent; returns `already_voided` if it was) |
 | POST | `/api/payments/` | Record a client payment against invoices (`Line[].LinkedTxn`); deposit account must be Bank or Other Current Asset |
+| POST | `/api/payments/{id}/void` | Void a client payment, reopening its invoices (idempotent; returns `already_voided`) |
 | POST | `/api/vendor-credits/` | Create a vendor credit |
 | POST | `/api/journal-entries/` | Create a journal entry |
 | POST | `/api/journal-entries/{id}/void` | Void a journal entry |

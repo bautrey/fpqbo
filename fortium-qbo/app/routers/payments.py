@@ -106,6 +106,27 @@ async def create_payment(
     )
 
 
+@router.post("/{entity_id}/void", response_model=dict[str, Any])
+async def void_payment(
+    entity_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Void a customer payment, reopening the invoices it paid.
+
+    QBO keeps the record, zeroes `TotalAmt`, empties `Line` and writes
+    "Voided" into `PrivateNote`. Idempotent: a payment already voided comes
+    back 200 with `already_voided: true`. 404 when no payment with that id
+    exists in this company.
+    """
+    return await run_qbo_write(
+        qbo.void_payment(company_id, entity_id),
+        entity="payment void",
+        # No request body: a KeyError/TypeError is our bug, a logged 500.
+        has_body=False,
+    )
+
+
 @router.get("/{payment_id}", response_model=dict[str, Any])
 async def get_payment(
     payment_id: int,
