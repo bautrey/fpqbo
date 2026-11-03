@@ -1594,6 +1594,54 @@ class QBOService:
         result = await asyncio.to_thread(_create)
         return result.to_dict()
 
+    async def void_payment(
+        self, company_id: int, entity_id: int
+    ) -> dict[str, Any]:
+        """Void a customer Payment in QBO, reopening the invoices it paid.
+
+        Same shape as `void_bill_payment`: Payment carries the SDK's
+        `VoidMixin`, the void fires once with no retry, a payment already in
+        the voided state is a no-op, and only the first fetch maps a 610 to
+        404. QuickBooks writes "Voided" into PrivateNote itself, so there is
+        no stamp here; the SDK's save() is a full update and would replace a
+        memo rather than amend it (#25).
+
+        Voided shape, measured 2026-11-03: FOR-971 Payment 270 reads
+        TotalAmt 0 with `Line: []`. FOR-138's QBO-made credit-link payments
+        also total 0 but keep two lines, so `_is_voided` (zero AND no lines)
+        tells them apart exactly as it does for bill payments.
+
+        Returns:
+            The Payment as a dict after the re-read, plus `already_voided`.
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _fetch():
+            return Payment.get(entity_id, qb=client)
+
+        try:
+            existing = await asyncio.to_thread(_fetch)
+        except ObjectNotFoundException as exc:
+            raise QboNotFound(f"Payment {entity_id} not found") from exc
+
+        if self._is_voided(existing):
+            result = existing.to_dict()
+            result["already_voided"] = True
+            return result
+
+        def _void():
+            existing.void(qb=client)
+            # Re-read: QBO answers the void with a sparse object.
+            return Payment.get(entity_id, qb=client)
+
+        # asyncio.to_thread, not _to_thread_with_retry: a retried void after
+        # QBO applied it fails as a re-void and reports 500 on correct books.
+        voided = await asyncio.to_thread(_void)
+        result = voided.to_dict()
+        result["already_voided"] = False
+        return result
+
     # -------------------------------------------------------------------------
     # BillPayment
     # -------------------------------------------------------------------------
