@@ -58,7 +58,7 @@ def _key(key_id: int, name: str, active: bool):
         key_prefix="fpq_abc",
         company=SimpleNamespace(name="Co"),
         is_active=active,
-        is_read_only=False,
+        can_write=True,
         created_at=datetime(2026, 1, 1),
         last_used_at=None,
     )

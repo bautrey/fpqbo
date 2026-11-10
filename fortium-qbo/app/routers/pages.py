@@ -1,6 +1,7 @@
 """Pages router for HTML template rendering."""
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["pages"])
 
 # Initialize Jinja2 templates
-templates = Jinja2Templates(directory="app/templates")
+templates = Jinja2Templates(directory=Path(__file__).resolve().parent.parent / "templates")
 
 
 @router.get("/login")
