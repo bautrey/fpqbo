@@ -1437,8 +1437,9 @@ class QBOService:
             company_id: QBO company ID
             bill_data: Dict with VendorRef, TxnDate, DueDate, DocNumber,
                 PrivateNote, GlobalTaxCalculation (TaxExcluded,
-                TaxInclusive or NotApplicable; omitted, QBO applies the
-                company default), APAccountRef, DepartmentRef, CurrencyRef, and
+                TaxInclusive or NotApplicable, passed to QBO as given and
+                not sent when omitted), APAccountRef, DepartmentRef,
+                CurrencyRef, and
                 Line[] (each line: Amount, Description, plus
                 AccountBasedExpenseLineDetail with AccountRef/ClassRef/
                 CustomerRef/TaxCodeRef).
