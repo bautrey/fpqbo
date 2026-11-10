@@ -118,11 +118,16 @@ else
     "$staging/v/bin/pip" install -q -r fortium-qbo/requirements-dev.txt >/dev/null 2>&1 \
       || { echo "could not install fortium-qbo/requirements-dev.txt (offline?)"; cannot_measure; }
 
-    if [ -n "$VENV" ] && [ -e "$VENV" ] && trustworthy "$VENV"; then
-      # Our own cache, and broken (we only build when the import check failed).
-      # Move it into staging so the trap or the cleanup below deletes it, and the
-      # fresh build can take its place. Left in place, it was never replaced and
-      # every run rebuilt from scratch.
+    if [ -n "$VENV" ] && [ -e "$VENV" ] && trustworthy "$VENV" \
+       && ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
+      # Our own cache, and STILL broken now that our build is done. Move it into
+      # staging so the trap or the cleanup below deletes it, and the fresh build
+      # can take its place. Left in place, it was never replaced and every run
+      # rebuilt from scratch.
+      # Invariant: a cache that imports pytest is never retired. It is checked
+      # again here, not taken from the check before the build, because a
+      # concurrent run may have published a healthy cache in the meantime and be
+      # running pytest out of it.
       mv "$VENV" "$staging/stale-cache" 2>/dev/null || true
     fi
 
