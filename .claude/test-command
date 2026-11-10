@@ -7,7 +7,9 @@
 # Exit codes:
 #   0    tests passed
 #   1    tests failed  (the gate should go RED)
-#   125  could not measure (no python3, or dependencies could not be installed)
+#   125  could not measure (no python3, or dependencies could not be installed).
+#        Always exit through cannot_measure(), never a bare `exit 125`: the loop's
+#        test gate reads 125 as unmeasurable only with its sentinel line printed.
 #
 # Two things this deliberately does NOT do:
 #   - It does not collect the repo root. `test_sdk_invoices.py` and the other
@@ -107,8 +109,20 @@ else
     staging=$(mktemp -d "${TMPDIR:-/tmp}/fpqbo-venv-build.XXXXXX") || { echo "could not mktemp"; cannot_measure; }
     trap 'rm -rf "$staging"' EXIT
     "$PY" -m venv "$staging/v" >/dev/null 2>&1 || { echo "could not create venv with $PY"; cannot_measure; }
+    # Under umask 002 (the Linux default) the venv dir is 775, which trustworthy()
+    # rejects. Without this the build was moved into the cache, then judged
+    # untrusted, and the run fell back to the staging path it had just moved away.
+    chmod go-w "$staging/v"
     "$staging/v/bin/pip" install -q -r fortium-qbo/requirements-dev.txt >/dev/null 2>&1 \
       || { echo "could not install fortium-qbo/requirements-dev.txt (offline?)"; cannot_measure; }
+
+    if [ -n "$VENV" ] && [ -e "$VENV" ] && trustworthy "$VENV"; then
+      # Our own cache, and broken (we only build when the import check failed).
+      # Move it into staging so the trap or the cleanup below deletes it, and the
+      # fresh build can take its place. Left in place, it was never replaced and
+      # every run rebuilt from scratch.
+      mv "$VENV" "$staging/stale-cache" 2>/dev/null || true
+    fi
 
     if [ -n "$VENV" ] && [ ! -e "$VENV" ]; then
       # -e, not -d: a DANGLING SYMLINK is not a directory, so the old `[ ! -d ]`
