@@ -108,11 +108,13 @@ else
   if [ -z "$VENV" ] || ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
     staging=$(mktemp -d "${TMPDIR:-/tmp}/fpqbo-venv-build.XXXXXX") || { echo "could not mktemp"; cannot_measure; }
     trap 'rm -rf "$staging"' EXIT
+    # Build the whole tree private. Under umask 002 (the Linux default) every
+    # directory in the venv was 775: the top one failed trustworthy() after the
+    # move, and the run fell back to the staging path it had just moved away.
+    # Fixing only the top directory would have trusted a cache whose bin/ and
+    # site-packages stayed group-writable, so the umask covers everything built.
+    umask 077
     "$PY" -m venv "$staging/v" >/dev/null 2>&1 || { echo "could not create venv with $PY"; cannot_measure; }
-    # Under umask 002 (the Linux default) the venv dir is 775, which trustworthy()
-    # rejects. Without this the build was moved into the cache, then judged
-    # untrusted, and the run fell back to the staging path it had just moved away.
-    chmod go-w "$staging/v"
     "$staging/v/bin/pip" install -q -r fortium-qbo/requirements-dev.txt >/dev/null 2>&1 \
       || { echo "could not install fortium-qbo/requirements-dev.txt (offline?)"; cannot_measure; }
 
