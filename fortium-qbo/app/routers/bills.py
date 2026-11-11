@@ -94,6 +94,7 @@ async def create_bill(
         "DocNumber": "INV-001-456-Doe",
         "PrivateNote": "Optional memo",
         "APAccountRef": {"value": "81"},
+        "GlobalTaxCalculation": "TaxExcluded",
         "Line": [
             {
                 "Amount": 1000.00,
@@ -101,11 +102,16 @@ async def create_bill(
                 "AccountBasedExpenseLineDetail": {
                     "AccountRef": {"value": "60"},
                     "ClassRef": {"value": "5000000000000123456"},
-                    "CustomerRef": {"value": "42"}
+                    "CustomerRef": {"value": "42"},
+                    "TaxCodeRef": {"value": "5"}
                 }
             }
         ]
     }
+
+    `GlobalTaxCalculation` (TaxExcluded, TaxInclusive or NotApplicable) is
+    passed to QuickBooks as given. A Canadian bill that carries a TaxCodeRef on
+    each line sends TaxExcluded. Omitted, the field is not sent.
     """
     return await run_qbo_write(
         qbo.create_bill(company_id, bill_data), entity="bill"

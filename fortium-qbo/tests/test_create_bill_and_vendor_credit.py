@@ -161,6 +161,66 @@ def test_create_bill_minimal_payload(monkeypatch):
     assert bill.Line[0].AccountBasedExpenseLineDetail.AccountRef.value == "60"
 
 
+def test_create_bill_sends_global_tax_calculation(monkeypatch):
+    """A CA bill with per-line TaxCodeRef needs TaxExcluded to reach QuickBooks.
+
+    payouts' credit-and-regenerate sends it, and dropping it lands the bill with
+    the company's default tax treatment instead. Asserted on the JSON the SDK
+    sends, not only the attribute, so the field has to survive serialisation.
+    """
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    sentinel = _Sentinel()
+    monkeypatch.setattr(
+        qbo_service_module.Bill, "save",
+        lambda self, qb=None: sentinel(self),
+        raising=True,
+    )
+
+    payload = {
+        "VendorRef": {"value": "123"},
+        "GlobalTaxCalculation": "TaxExcluded",
+        "Line": [
+            {
+                "Amount": 100.00,
+                "AccountBasedExpenseLineDetail": {
+                    "AccountRef": {"value": "60"},
+                    "TaxCodeRef": {"value": "5"},
+                },
+            },
+        ],
+    }
+
+    _run(svc.create_bill(1, payload))
+
+    sent = json.loads(sentinel.captured.to_json())
+    assert sent["GlobalTaxCalculation"] == "TaxExcluded"
+    assert sent["Line"][0]["AccountBasedExpenseLineDetail"]["TaxCodeRef"]["value"] == "5"
+
+
+def test_create_bill_omits_global_tax_calculation_when_absent(monkeypatch):
+    """No field from the caller means QuickBooks applies the company default."""
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_get_company", lambda _cid: SimpleNamespace(realm_id="r1"))
+    monkeypatch.setattr(svc, "_get_client", lambda _co: SimpleNamespace())
+
+    sentinel = _Sentinel()
+    monkeypatch.setattr(
+        qbo_service_module.Bill, "save",
+        lambda self, qb=None: sentinel(self),
+        raising=True,
+    )
+
+    _run(svc.create_bill(1, {
+        "VendorRef": {"value": "123"},
+        "Line": [{"Amount": 1.0, "AccountBasedExpenseLineDetail": {"AccountRef": {"value": "60"}}}],
+    }))
+
+    assert "GlobalTaxCalculation" not in json.loads(sentinel.captured.to_json())
+
+
 # ---------------------------------------------------------------------------
 # create_vendor_credit
 # ---------------------------------------------------------------------------

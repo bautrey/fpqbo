@@ -1436,7 +1436,10 @@ class QBOService:
         Args:
             company_id: QBO company ID
             bill_data: Dict with VendorRef, TxnDate, DueDate, DocNumber,
-                PrivateNote, APAccountRef, DepartmentRef, CurrencyRef, and
+                PrivateNote, GlobalTaxCalculation (TaxExcluded,
+                TaxInclusive or NotApplicable, passed to QBO as given and
+                not sent when omitted), APAccountRef, DepartmentRef,
+                CurrencyRef, and
                 Line[] (each line: Amount, Description, plus
                 AccountBasedExpenseLineDetail with AccountRef/ClassRef/
                 CustomerRef/TaxCodeRef).
@@ -1450,7 +1453,9 @@ class QBOService:
         def _create():
             bill = Bill()
 
-            for field in ("TxnDate", "DueDate", "DocNumber", "PrivateNote"):
+            for field in (
+                "TxnDate", "DueDate", "DocNumber", "PrivateNote", "GlobalTaxCalculation",
+            ):
                 if field in bill_data:
                     setattr(bill, field, bill_data[field])
 
