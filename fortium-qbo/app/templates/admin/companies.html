@@ -152,7 +152,7 @@
                                 <form action="/api/qbo/companies/{{ company.id }}/disconnect"
                                       method="POST"
                                       class="d-inline"
-                                      onsubmit="return confirm('Disconnect {{ company.name }}? This will revoke API access.')">
+                                      onsubmit='return confirm({{ ("Disconnect " ~ company.name ~ "? This will revoke API access.")|tojson }})'>
                                     <button type="submit" class="btn btn-sm btn-outline-danger" title="Disconnect">
                                         <i class="bi bi-x-circle"></i>
                                     </button>

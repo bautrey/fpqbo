@@ -115,13 +115,13 @@
                             <td class="text-end">
                                 {% if key.is_active %}
                                 <button class="btn btn-sm btn-outline-danger"
-                                        onclick="revokeKey({{ key.id }}, '{{ key.name }}')"
+                                        onclick='revokeKey({{ key.id }}, {{ key.name|tojson }})'
                                         title="Revoke Key">
                                     <i class="bi bi-x-circle"></i> Revoke
                                 </button>
                                 {% else %}
                                 <button class="btn btn-sm btn-outline-success"
-                                        onclick="reactivateKey({{ key.id }}, '{{ key.name }}')"
+                                        onclick='reactivateKey({{ key.id }}, {{ key.name|tojson }})'
                                         title="Reactivate Key">
                                     <i class="bi bi-check-circle"></i> Reactivate
                                 </button>

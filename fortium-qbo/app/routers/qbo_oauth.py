@@ -1,5 +1,6 @@
 """QBO OAuth router for QuickBooks Online connection management."""
 
+import html
 import logging
 import random
 import re
@@ -105,7 +106,7 @@ def _error_response(message: str, status_code: int = 400) -> HTMLResponse:
 
     Per stakeholder decision: HTML error pages are best practice for browser OAuth flows.
     """
-    html = f"""
+    page = f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -123,7 +124,7 @@ def _error_response(message: str, status_code: int = 400) -> HTMLResponse:
                             <h5 class="mb-0">QuickBooks Connection Error</h5>
                         </div>
                         <div class="card-body">
-                            <p class="card-text">{message}</p>
+                            <p class="card-text">{html.escape(message)}</p>
                             <a href="/admin/companies" class="btn btn-primary">Back to Companies</a>
                         </div>
                     </div>
@@ -133,7 +134,7 @@ def _error_response(message: str, status_code: int = 400) -> HTMLResponse:
     </body>
     </html>
     """
-    return HTMLResponse(content=html, status_code=status_code)
+    return HTMLResponse(content=page, status_code=status_code)
 
 
 def _generate_company_code(db, company_name: str) -> str:
