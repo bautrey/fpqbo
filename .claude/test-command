@@ -7,7 +7,9 @@
 # Exit codes:
 #   0    tests passed
 #   1    tests failed  (the gate should go RED)
-#   125  could not measure (no python3, or dependencies could not be installed)
+#   125  could not measure (no python3, or dependencies could not be installed).
+#        Always exit through cannot_measure(), never a bare `exit 125`: the loop's
+#        test gate reads 125 as unmeasurable only with its sentinel line printed.
 #
 # Two things this deliberately does NOT do:
 #   - It does not collect the repo root. `test_sdk_invoices.py` and the other
@@ -20,7 +22,12 @@
 #     pytest-asyncio loaded; if it ever stops loading, the asserts below catch it.
 
 set -uo pipefail
-cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$0")")" || exit 125
+
+# 125 alone is also a valid Test::Harness failure count, so the review loop's
+# test gate reads a bare 125 as a RED suite. It treats 125 as "could not measure"
+# only with this exact line on the output.
+cannot_measure() { echo "LOOP-TEST-GATE: CANNOT-MEASURE"; exit 125; }
+cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$0")")" || cannot_measure
 
 # Match production's interpreter when it is available. fortium-qbo/Dockerfile is
 # python:3.11-slim, this machine's default python3 is 3.13, and a venv built from
@@ -31,7 +38,7 @@ PY=""
 for cand in python3.11 python3; do
   command -v "$cand" >/dev/null 2>&1 && { PY="$cand"; break; }
 done
-[ -n "$PY" ] || { echo "no python3 on PATH"; exit 125; }
+[ -n "$PY" ] || { echo "no python3 on PATH"; cannot_measure; }
 [ "$PY" = "python3.11" ] || echo "NOTE: python3.11 not found, measuring on $($PY -V 2>&1); prod runs 3.11"
 
 # Prefer a venv that already has the dev deps; otherwise build one in a cache
@@ -54,7 +61,7 @@ if [ -x venv/bin/python ] && venv/bin/python -c "import pytest, pytest_asyncio" 
 else
   reqhash=$(cat fortium-qbo/requirements.txt fortium-qbo/requirements-dev.txt 2>/dev/null \
             | "$PY" -c 'import hashlib,sys; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:12])')
-  [ -n "$reqhash" ] || { echo "could not read fortium-qbo/requirements*.txt"; exit 125; }
+  [ -n "$reqhash" ] || { echo "could not read fortium-qbo/requirements*.txt"; cannot_measure; }
   pyver=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
   # uid in the path: $TMPDIR is per-user on macOS, but the /tmp fallback (Linux,
   # CI images) is world-writable, and a predictable name there is a directory
@@ -99,11 +106,30 @@ else
   fi
 
   if [ -z "$VENV" ] || ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
-    staging=$(mktemp -d "${TMPDIR:-/tmp}/fpqbo-venv-build.XXXXXX") || { echo "could not mktemp"; exit 125; }
+    staging=$(mktemp -d "${TMPDIR:-/tmp}/fpqbo-venv-build.XXXXXX") || { echo "could not mktemp"; cannot_measure; }
     trap 'rm -rf "$staging"' EXIT
-    "$PY" -m venv "$staging/v" >/dev/null 2>&1 || { echo "could not create venv with $PY"; exit 125; }
+    # Build the whole tree private. Under umask 002 (the Linux default) every
+    # directory in the venv was 775: the top one failed trustworthy() after the
+    # move, and the run fell back to the staging path it had just moved away.
+    # Fixing only the top directory would have trusted a cache whose bin/ and
+    # site-packages stayed group-writable, so the umask covers everything built.
+    umask 077
+    "$PY" -m venv "$staging/v" >/dev/null 2>&1 || { echo "could not create venv with $PY"; cannot_measure; }
     "$staging/v/bin/pip" install -q -r fortium-qbo/requirements-dev.txt >/dev/null 2>&1 \
-      || { echo "could not install fortium-qbo/requirements-dev.txt (offline?)"; exit 125; }
+      || { echo "could not install fortium-qbo/requirements-dev.txt (offline?)"; cannot_measure; }
+
+    if [ -n "$VENV" ] && [ -e "$VENV" ] && trustworthy "$VENV" \
+       && ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
+      # Our own cache, and STILL broken now that our build is done. Move it into
+      # staging so the trap or the cleanup below deletes it, and the fresh build
+      # can take its place. Left in place, it was never replaced and every run
+      # rebuilt from scratch.
+      # Invariant: a cache that imports pytest is never retired. It is checked
+      # again here, not taken from the check before the build, because a
+      # concurrent run may have published a healthy cache in the meantime and be
+      # running pytest out of it.
+      mv "$VENV" "$staging/stale-cache" 2>/dev/null || true
+    fi
 
     if [ -n "$VENV" ] && [ ! -e "$VENV" ]; then
       # -e, not -d: a DANGLING SYMLINK is not a directory, so the old `[ ! -d ]`
@@ -111,16 +137,20 @@ else
       # pointed. Whoever wins this race, both trees came from the same hash.
       mv "$staging/v" "$VENV" 2>/dev/null || VENV=""
     fi
-    if [ -z "$VENV" ] || ! trustworthy "$VENV"; then
-      # Either the path was untrustworthy from the start or someone took it while
-      # we were building. Run out of staging and clean it at exit instead.
+    if [ -z "$VENV" ] || ! trustworthy "$VENV" \
+       || ! "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null; then
+      # The path was untrustworthy from the start, someone took it while we were
+      # building, or it is OUR cache but broken (exists, so the mv above skipped
+      # it, yet cannot import pytest). Run out of staging and clean it at exit
+      # instead. Without the import check a broken cache was kept and the fresh
+      # build deleted, so every run exited 125 until someone removed it by hand.
       VENV="$staging/v"
     else
       rm -rf "$staging"; trap - EXIT
     fi
 
     "$VENV/bin/python" -c "import pytest, pytest_asyncio" 2>/dev/null \
-      || { echo "venv at $VENV is unusable after build"; exit 125; }
+      || { echo "venv at $VENV is unusable after build"; cannot_measure; }
   fi
 fi
 
@@ -137,21 +167,21 @@ echo "$out" | tail -20
 # a test failure. Reporting it as 1 blames the author for an empty suite; the
 # guards below would catch it anyway, but only after calling it red first.
 if [ $rc -eq 5 ]; then
-  echo "GATE: pytest collected no tests (exit 5) — reporting unmeasurable"; exit 125
+  echo "GATE: pytest collected no tests (exit 5) — reporting unmeasurable"; cannot_measure
 fi
 
 # A suite that collected nothing, or that skipped its way to green, exits 0 and
 # reads as evidence. Refuse to report that as a pass.
 if [ $rc -eq 0 ]; then
   if echo "$out" | grep -qE '^no tests ran'; then
-    echo "GATE: pytest collected nothing — reporting unmeasurable, not pass"; exit 125
+    echo "GATE: pytest collected nothing — reporting unmeasurable, not pass"; cannot_measure
   fi
   # grep -oE, not sed with a leading .*[^0-9] — pytest prints "663 passed in
   # 5.53s" at the START of the line, so a required non-digit before the count
   # never matches and every run reports unmeasurable.
   passed=$(echo "$out" | grep -oE '[0-9]+ passed' | tail -1 | grep -oE '[0-9]+')
   if [ -z "${passed:-}" ] || [ "$passed" -lt 600 ]; then
-    echo "GATE: expected 600+ passing tests, summary said '${passed:-none}' — reporting unmeasurable"; exit 125
+    echo "GATE: expected 600+ passing tests, summary said '${passed:-none}' — reporting unmeasurable"; cannot_measure
   fi
 fi
 exit $rc
