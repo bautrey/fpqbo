@@ -30,20 +30,33 @@ router = APIRouter(tags=["qbo-oauth"])
 # - /api/qbo/connect, /api/qbo/companies/...
 
 
+class _NotSignedIn(Exception):
+    """Raised by `_require_auth`; `.redirect` is the 302 to /login.
+
+    A Response can't be raised (it isn't an exception), which is why the
+    previous `raise RedirectResponse(...)` turned every signed-out request
+    into a 500 (#78).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("not signed in")
+        self.redirect = RedirectResponse(url="/login", status_code=302)
+
+
 def _require_auth(request: Request) -> str:
     """
     Verify admin authentication from session cookie.
 
     Returns email if authenticated.
-    Raises RedirectResponse to /login if not authenticated.
+    Raises _NotSignedIn (carrying a redirect to /login) if not authenticated.
     """
     session_token = request.cookies.get("auth_session")
     if not session_token:
-        raise RedirectResponse(url="/login", status_code=302)
+        raise _NotSignedIn()
 
     email = verify_session(session_token)
     if not email:
-        raise RedirectResponse(url="/login", status_code=302)
+        raise _NotSignedIn()
 
     # Verify user exists in admin_users
     db = SessionLocal()
@@ -53,7 +66,7 @@ def _require_auth(request: Request) -> str:
         ).scalar_one_or_none()
 
         if not admin_user:
-            raise RedirectResponse(url="/login", status_code=302)
+            raise _NotSignedIn()
 
         return email
     finally:
@@ -219,8 +232,8 @@ async def qbo_connect(request: Request, region: str = "US", sandbox: bool = Fals
         email = _require_auth(request)
         env_label = "sandbox" if sandbox else region
         logger.info(f"QBO OAuth connect initiated by {email} for {env_label}")
-    except RedirectResponse as redirect:
-        return redirect
+    except _NotSignedIn as signed_out:
+        return signed_out.redirect
 
     # Sandbox is US-based and uses its own (Development) credentials
     if sandbox:
@@ -296,8 +309,8 @@ async def qbo_callback(
     try:
         email = _require_auth(request)
         logger.info(f"QBO OAuth callback received for {email}")
-    except RedirectResponse as redirect:
-        return redirect
+    except _NotSignedIn as signed_out:
+        return signed_out.redirect
 
     # Handle OAuth error from Intuit
     if error:
@@ -430,8 +443,8 @@ async def disconnect_company(request: Request, company_id: int):
     try:
         email = _require_auth(request)
         logger.info(f"Disconnect company {company_id} requested by {email}")
-    except RedirectResponse as redirect:
-        return redirect
+    except _NotSignedIn as signed_out:
+        return signed_out.redirect
 
     db = SessionLocal()
     try:
@@ -509,7 +522,7 @@ async def refresh_company_token(request: Request, company_id: int):
     try:
         email = _require_auth(request)
         logger.info(f"Manual token refresh for company {company_id} requested by {email}")
-    except RedirectResponse:
+    except _NotSignedIn:
         return {"success": False, "message": "Authentication required", "reconnect_required": False}
 
     db = SessionLocal()
@@ -600,7 +613,7 @@ async def refresh_all_tokens(request: Request):
     try:
         email = _require_auth(request)
         logger.info(f"Manual refresh-all initiated by {email}")
-    except RedirectResponse as redirect:
+    except _NotSignedIn:
         return {"error": "Authentication required"}
 
     from app.services.token_refresh_scheduler import token_scheduler
