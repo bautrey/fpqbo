@@ -2990,6 +2990,59 @@ class QBOService:
         )
         return result.to_dict()
 
+    async def create_class(
+        self, company_id: int, class_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a tracking Class in QBO.
+
+        Args:
+            class_data: Name (required). Optional: SubClass and ParentRef
+                (a sub-class names its parent), Active.
+
+        Returns:
+            Created Class as dict. Put its Id in a line's ClassRef.
+        Raises:
+            QboBadPayload: an unaccepted key, a blank Name, a non-boolean
+                SubClass/Active, a ParentRef without a value, or SubClass
+                disagreeing with ParentRef. Nothing is sent to QBO.
+        """
+        unknown = sorted(set(class_data) - {"Name", "SubClass", "ParentRef", "Active"})
+        if unknown:
+            raise QboBadPayload(f"Class fields not accepted: {', '.join(unknown)}")
+        name = class_data.get("Name")
+        if not isinstance(name, str) or not name.strip():
+            raise QboBadPayload("Class requires a non-blank Name")
+        for bool_field in ("SubClass", "Active"):
+            if bool_field in class_data and not isinstance(class_data[bool_field], bool):
+                raise QboBadPayload(f"Class {bool_field} must be true or false")
+        parent = class_data.get("ParentRef")
+        if parent is not None and not (isinstance(parent, dict) and parent.get("value")):
+            raise QboBadPayload('Class ParentRef must be {"value": "<parent class Id>"}')
+        # QBO nests a class only when SubClass is true AND ParentRef names the
+        # parent. The SDK defaults SubClass to False, so a parent implies it.
+        sub_class = class_data.get("SubClass", parent is not None)
+        if sub_class != (parent is not None):
+            raise QboBadPayload("Class SubClass must be true exactly when ParentRef is given")
+
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            cls = TrackingClass()
+            cls.Name = name
+            cls.SubClass = sub_class
+            if "Active" in class_data:
+                cls.Active = class_data["Active"]
+            if parent is not None:
+                ref = Ref()
+                ref.value = str(parent["value"])
+                ref.name = parent.get("name")
+                cls.ParentRef = ref
+            return cls.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
+
     # -------------------------------------------------------------------------
     # CustomerType
     # -------------------------------------------------------------------------
