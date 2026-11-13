@@ -2990,6 +2990,37 @@ class QBOService:
         )
         return result.to_dict()
 
+    async def create_class(
+        self, company_id: int, class_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a tracking Class in QBO.
+
+        Args:
+            class_data: Name (required). Optional: SubClass and ParentRef
+                (a sub-class names its parent), Active.
+
+        Returns:
+            Created Class as dict. Put its Id in a line's ClassRef.
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+
+        def _create():
+            cls = TrackingClass()
+            cls.Name = class_data["Name"]
+            for bool_field in ("SubClass", "Active"):
+                if bool_field in class_data:
+                    setattr(cls, bool_field, class_data[bool_field])
+            if class_data.get("ParentRef"):
+                ref = Ref()
+                ref.value = str(class_data["ParentRef"]["value"])
+                ref.name = class_data["ParentRef"].get("name")
+                cls.ParentRef = ref
+            return cls.save(qb=client)
+
+        result = await asyncio.to_thread(_create)
+        return result.to_dict()
+
     # -------------------------------------------------------------------------
     # CustomerType
     # -------------------------------------------------------------------------
