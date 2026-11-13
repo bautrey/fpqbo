@@ -62,6 +62,12 @@ def test_create_class_top_level_has_no_parent(monkeypatch):
     assert "ParentRef" not in cls.to_dict()
 
 
+def test_integer_parent_id_is_sent_as_a_string(monkeypatch):
+    svc, captured = _service(monkeypatch)
+    asyncio.run(svc.create_class(1, {"Name": "Interim", "ParentRef": {"value": 7}}))
+    assert captured["obj"].to_dict()["ParentRef"]["value"] == "7"
+
+
 def test_parent_without_subclass_is_sent_as_a_subclass(monkeypatch):
     # The SDK defaults SubClass to False; a ParentRef with SubClass false is
     # not a sub-class in QBO, so naming a parent has to imply SubClass.
@@ -84,6 +90,11 @@ def test_parent_without_subclass_is_sent_as_a_subclass(monkeypatch):
         ({"Name": "X", "SubClass": "true", "ParentRef": {"value": "7"}}, "SubClass"),
         ({"Name": "X", "ParentRef": "7"}, "ParentRef"),
         ({"Name": "X", "ParentRef": {"name": "ZRG"}}, "ParentRef"),
+        ({"Name": "X", "ParentRef": {"value": ["7"]}}, "ParentRef"),
+        ({"Name": "X", "ParentRef": {"value": True}}, "ParentRef"),
+        ({"Name": "X", "ParentRef": {"value": {"id": "7"}}}, "ParentRef"),
+        ({"Name": "X", "ParentRef": {"value": "  "}}, "ParentRef"),
+        ({"Name": "X", "ParentRef": {"value": 7.5}}, "ParentRef"),
         ({"Name": "X", "SubClass": True}, "ParentRef"),
         ({"Name": "X", "SubClass": False, "ParentRef": {"value": "7"}}, "SubClass"),
     ],
