@@ -95,6 +95,8 @@ def test_parent_without_subclass_is_sent_as_a_subclass(monkeypatch):
         ({"Name": "X", "ParentRef": {"value": {"id": "7"}}}, "ParentRef"),
         ({"Name": "X", "ParentRef": {"value": "  "}}, "ParentRef"),
         ({"Name": "X", "ParentRef": {"value": 7.5}}, "ParentRef"),
+        ({"Name": "X", "ParentRef": {"value": 0}}, "ParentRef"),
+        ({"Name": "X", "ParentRef": {"value": -5}}, "ParentRef"),
         ({"Name": "X", "SubClass": True}, "ParentRef"),
         ({"Name": "X", "SubClass": False, "ParentRef": {"value": "7"}}, "SubClass"),
     ],

@@ -3017,12 +3017,12 @@ class QBOService:
                 raise QboBadPayload(f"Class {bool_field} must be true or false")
         parent = class_data.get("ParentRef")
         if parent is not None:
-            # An Id is a non-blank string or an int; bool is an int subclass, so
-            # exclude it, or {"value": true} would reach QBO as "True".
+            # An Id is a non-blank string or a positive int; bool is an int
+            # subclass, so exclude it, or {"value": true} would reach QBO as "True".
             pid = parent.get("value") if isinstance(parent, dict) else None
             if not (
                 (isinstance(pid, str) and pid.strip())
-                or (isinstance(pid, int) and not isinstance(pid, bool))
+                or (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0)
             ):
                 raise QboBadPayload('Class ParentRef must be {"value": "<parent class Id>"}')
         # QBO nests a class only when SubClass is true AND ParentRef names the
