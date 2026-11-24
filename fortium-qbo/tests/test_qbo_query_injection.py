@@ -364,7 +364,9 @@ def test_the_active_clause_is_the_filter_it_replaced():
     """`Entity.filter(Active=True)` became a where-clause so the read could
     page. The clause has to mean the same thing the filter did."""
     assert _active_clause(True) == "Active = true"
-    assert _active_clause(False) is None
+    # QBO hides inactive name-list rows unless the WHERE names Active, so
+    # "everything" has to say so (measured on FOR-138, 2026-11-24).
+    assert _active_clause(False) == "Active IN (true, false)"
 
 
 @pytest.mark.parametrize("payload", ["false", "true", 1, 0, None, []])

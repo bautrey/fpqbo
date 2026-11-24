@@ -4,7 +4,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.dependencies import verify_api_key
-from app.routers._qbo_write import run_qbo_write
+from app.routers._qbo_write import request_id_header, run_qbo_write
 from app.services.qbo_service import QBOService, get_qbo_service
 from app.utils.paging import (
     MAX_RESULTS_DESCRIPTION,
@@ -63,6 +63,7 @@ async def list_vendor_credits(
 async def create_vendor_credit(
     company_id: int = Query(..., description="QBO company ID"),
     credit_data: dict[str, Any] = Body(..., description="VendorCredit data"),
+    request_id: str | None = Depends(request_id_header),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
     """Create a vendor credit in QBO.
@@ -88,7 +89,8 @@ async def create_vendor_credit(
     }
     """
     return await run_qbo_write(
-        qbo.create_vendor_credit(company_id, credit_data), entity="vendor credit"
+        qbo.create_vendor_credit(company_id, credit_data, request_id=request_id),
+        entity="vendor credit",
     )
 
 

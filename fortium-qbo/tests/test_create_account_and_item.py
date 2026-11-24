@@ -47,7 +47,7 @@ def test_create_account_builds_payload_with_all_fields(monkeypatch):
 
     sentinel = _Sentinel()
     monkeypatch.setattr(
-        qbo_service_module.Account, "save", lambda self, qb=None: sentinel(self), raising=True
+        qbo_service_module.Account, "save", lambda self, qb=None, request_id=None: sentinel(self), raising=True
     )
 
     payload = {
@@ -89,7 +89,7 @@ def test_create_account_minimal_payload(monkeypatch):
 
     sentinel = _Sentinel()
     monkeypatch.setattr(
-        qbo_service_module.Account, "save", lambda self, qb=None: sentinel(self), raising=True
+        qbo_service_module.Account, "save", lambda self, qb=None, request_id=None: sentinel(self), raising=True
     )
 
     result = _run(svc.create_account(1, {"Name": "Cash on Hand", "AccountType": "Bank"}))

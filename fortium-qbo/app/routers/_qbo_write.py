@@ -45,9 +45,10 @@ Nothing is swallowed — every path re-raises via ``HTTPException``.
 """
 
 import logging
+import re
 from typing import Any, Awaitable
 
-from fastapi import HTTPException
+from fastapi import Header, HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -103,3 +104,26 @@ async def run_qbo_write(
     except Exception as e:
         logger.error("QBO write failed for %s: %s", entity, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}") from e
+
+
+_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,50}")
+
+
+def request_id_header(
+    request_id: str | None = Header(
+        None,
+        alias="Request-Id",
+        description=(
+            "Optional idempotency key, 1 to 50 characters of A-Z a-z 0-9 _ -. "
+            "QuickBooks answers a repeat of the same id with the original "
+            "result instead of creating a second record."
+        ),
+    ),
+) -> str | None:
+    """Validate the optional Request-Id header before any QBO call is made."""
+    if request_id is not None and not _REQUEST_ID_PATTERN.fullmatch(request_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Request-Id must be 1 to 50 characters of A-Z, a-z, 0-9, '_' or '-'.",
+        )
+    return request_id

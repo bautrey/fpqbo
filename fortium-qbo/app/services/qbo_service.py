@@ -65,6 +65,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.qbo_company import QboCompany
+from fastapi import HTTPException
+
 from app.exceptions import QboBadPayload, QboCompanyDisconnected, QboNotFound, QboUnavailable
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
 from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
@@ -171,8 +173,11 @@ def _txn_date_clause(
 RECONNECT_REQUIRED_STATUSES = frozenset({"disconnected"})
 
 
-def _active_clause(active_only: bool) -> str | None:
-    """Build the Active portion of a QBO query, or None for everything.
+ACTIVE_ANY_CLAUSE = "Active IN (true, false)"
+
+
+def _active_clause(active_only: bool) -> str:
+    """Build the Active portion of a QBO query.
 
     `boolean_equals` is called before the branch rather than inside it. Testing
     `if active_only` first would hand the gate a literal `True` and let the
@@ -190,7 +195,10 @@ def _active_clause(active_only: bool) -> str | None:
     builder and one dialect now.
     """
     clause = boolean_equals("Active", active_only)
-    return clause if active_only else None
+    # QBO returns only active name-list rows unless the WHERE names `Active`,
+    # so "everything" has to say so. A bare None left inactive rows hidden
+    # (measured on FOR-138, 2026-11-24: 0 inactive across 2,292 rows).
+    return clause if active_only else ACTIVE_ANY_CLAUSE
 
 
 def _is_transient_qbo_error(exc: Exception) -> bool:
@@ -1074,7 +1082,8 @@ class QBOService:
         return result.to_dict()
 
     async def create_account(
-        self, company_id: int, account_data: dict[str, Any]
+        self, company_id: int, account_data: dict[str, Any],
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Create an Account (chart-of-accounts entry) in QBO.
 
@@ -1119,7 +1128,7 @@ class QBOService:
                     ref.name = account_data[ref_field].get("name")
                     setattr(acct, ref_field, ref)
 
-            return acct.save(qb=client)
+            return acct.save(qb=client, request_id=request_id)
 
         result = await asyncio.to_thread(_create)
         return result.to_dict()
@@ -1193,7 +1202,8 @@ class QBOService:
         return result.to_dict()
 
     async def create_vendor(
-        self, company_id: int, vendor_data: dict[str, Any]
+        self, company_id: int, vendor_data: dict[str, Any],
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a Vendor in QBO.
 
@@ -1255,7 +1265,7 @@ class QBOService:
                     ref.name = vendor_data[ref_field].get("name")
                     setattr(vnd, ref_field, ref)
 
-            return vnd.save(qb=client)
+            return vnd.save(qb=client, request_id=request_id)
 
         result = await asyncio.to_thread(_create)
         return result.to_dict()
@@ -1303,6 +1313,119 @@ class QBOService:
 
         account = await self._to_thread_with_retry(_fetch, op="get_account_by_number")
         return account.to_dict() if account else None
+
+    async def _lookup_all(self, entity, company_id: int, clause: str, op: str) -> list[dict[str, Any]]:
+        """Walk every row matching `clause`, or 503 if the walk was cut short.
+
+        A lookup that answers "no match" from a truncated walk would send the
+        caller to create a duplicate, so truncation is an error.
+        """
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+        page = await self._fetch_all_pages(entity, client=client, clause=clause, op=op)
+        if page.has_more:
+            raise QboUnavailable(f"{op}: result set too large to search completely")
+        return page.rows
+
+    async def lookup_vendors(
+        self,
+        company_id: int,
+        display_name: str | None = None,
+        email: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find vendors, active and inactive, by exact DisplayName and/or email.
+
+        QBO cannot filter on PrimaryEmailAddr, so an email match walks the
+        vendors (narrowed by DisplayName when that is also given) and compares
+        locally, case-insensitively and ignoring surrounding whitespace.
+        """
+        clause = _active_clause(False)
+        if display_name is not None:
+            clause = f"{string_equals('DisplayName', display_name)} AND {clause}"
+        rows = await self._lookup_all(Vendor, company_id, clause, "lookup_vendors")
+        if email is None:
+            return rows
+        wanted = email.strip().lower()
+        return [
+            r for r in rows
+            if ((r.get("PrimaryEmailAddr") or {}).get("Address") or "").strip().lower() == wanted
+        ]
+
+    async def lookup_accounts(self, company_id: int, name: str) -> list[dict[str, Any]]:
+        """Find accounts, active and inactive, by exact Name.
+
+        Names repeat under different parents, so every match comes back and the
+        caller reads FullyQualifiedName and ParentRef.
+        """
+        clause = f"{string_equals('Name', name)} AND {_active_clause(False)}"
+        return await self._lookup_all(Account, company_id, clause, "lookup_accounts")
+
+    async def _set_active(
+        self,
+        entity,
+        company_id: int,
+        entity_id: int,
+        active: bool,
+        *,
+        label: str,
+    ) -> dict[str, Any]:
+        """Sparse-update `Active` on a Vendor or Account, a no-op if already there.
+
+        No requestid: QBO replays the first answer for a repeated id, so a
+        deactivate then activate sent under one id would leave the record
+        inactive behind a 200. The already-in-state check is the idempotency.
+
+        QBO's refusals of the update come back as the caller's error: 5010
+        (stale SyncToken, someone edited the record between read and write) is
+        409, retryable; any other validation refusal, such as 6240 when a
+        reactivated name collides with an active one, is 400. The SDK raises
+        the bare QuickbooksException for 5000-9999 and ValidationException for
+        2000-4999; its other subclasses (auth, severe, not found) are not the
+        caller's fault and propagate.
+        """
+        import json as _json
+
+        company = self._get_company(company_id)
+        client = self._get_client(company)
+        record = await self._fetch_by_id(
+            entity, entity_id, client=client, op=f"set_{label.lower()}_active", label=label
+        )
+        if record.Active == active:
+            return record.to_dict()
+
+        def _update():
+            url = "{0}/company/{1}/{2}".format(client.api_url, client.company_id, label.lower())
+            payload = {
+                "Id": str(record.Id),
+                "SyncToken": str(record.SyncToken),
+                "sparse": True,
+                "Active": active,
+            }
+            response = client.post(url, _json.dumps(payload), params={"operation": "update"})
+            return entity.from_json(response[label])
+
+        logger.info(f"Setting {label} {entity_id} Active={active} for company {company.code}")
+        try:
+            result = await asyncio.to_thread(_update)
+        except QuickbooksException as e:
+            if type(e) not in (QuickbooksException, ValidationException):
+                raise
+            if e.error_code == QBO_THROTTLE_EXCEEDED:
+                # 3001 arrives as a ValidationException but is transient.
+                raise QboUnavailable(f"QBO throttled the update; retry: {e}") from e
+            status = 409 if e.error_code == 5010 else 400
+            raise HTTPException(status_code=status, detail=f"QBO refused: {e}") from e
+        return result.to_dict()
+
+    async def set_vendor_active(
+        self, company_id: int, vendor_id: int, active: bool
+    ) -> dict[str, Any]:
+        return await self._set_active(Vendor, company_id, vendor_id, active, label="Vendor")
+
+    async def set_account_active(
+        self, company_id: int, account_id: int, active: bool
+    ) -> dict[str, Any]:
+        return await self._set_active(Account, company_id, account_id, active, label="Account")
 
     async def get_bills(
         self,
@@ -2424,7 +2547,8 @@ class QBOService:
         return result.to_dict()
 
     async def create_vendor_credit(
-        self, company_id: int, credit_data: dict[str, Any]
+        self, company_id: int, credit_data: dict[str, Any],
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a VendorCredit in QBO.
 
@@ -2480,7 +2604,7 @@ class QBOService:
 
                 vc.Line.append(line)
 
-            return vc.save(qb=client)
+            return vc.save(qb=client, request_id=request_id)
 
         result = await asyncio.to_thread(_create)
         return result.to_dict()

@@ -942,7 +942,7 @@ def test_active_only_false_asks_for_everything(monkeypatch, attr, method):
 
     asyncio.run(getattr(svc, method)(company_id=1, active_only=False))
 
-    assert entity.queries[0]["where"] == ""
+    assert entity.queries[0]["where"] == "Active IN (true, false)"
 
 
 @pytest.mark.parametrize(
@@ -1121,7 +1121,7 @@ def test_the_unfiltered_total_counts_the_whole_file(monkeypatch, attr, method):
 
     asyncio.run(getattr(svc, method)(company_id=1, active_only=False))
 
-    assert entity.count_calls == [""]
+    assert entity.count_calls == ["Active IN (true, false)"]
 
 
 # ---------------------------------------------------------------------------
@@ -1152,7 +1152,15 @@ SIGNAL_ONLY_ROUTES = {
 # ledger, and an id that fails to resolve raises instead of returning a
 # subset. It cannot silently truncate, so it has no completeness signal to
 # give and must not imply one by sending paging headers.
-BOUNDED_ROUTES = {"/api/bill-payments/by-bill/{bill_id}"}
+#
+# The two lookups are bounded the same way: each returns the exact matches for
+# one name (or one name and email), walked to the end, and answers 503 when the
+# walk is truncated rather than return a prefix. No cursor to give.
+BOUNDED_ROUTES = {
+    "/api/bill-payments/by-bill/{bill_id}",
+    "/api/vendors/lookup",
+    "/api/accounts/lookup",
+}
 
 # A new entry in either set needs an argument, not a line.
 PAGING_EXEMPT = SIGNAL_ONLY_ROUTES | BOUNDED_ROUTES
