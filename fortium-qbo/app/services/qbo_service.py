@@ -1560,7 +1560,11 @@ class QBOService:
         unknown = sorted(set(payment_data) - set(scalar_fields) - set(ref_fields) - {"Line"})
         if unknown:
             raise QboBadPayload(f"Payment fields not accepted: {', '.join(unknown)}")
-        missing = [f for f in ("CustomerRef", "TotalAmt", "Line") if not payment_data.get(f)]
+        # TotalAmt 0 is a real amount: a $0 payment closes an invoice against a
+        # journal entry (#81). Only absent or null counts as missing for it.
+        missing = [f for f in ("CustomerRef", "Line") if not payment_data.get(f)]
+        if payment_data.get("TotalAmt") is None:
+            missing.insert(1, "TotalAmt")
         if missing:
             raise QboBadPayload(f"Payment requires: {', '.join(missing)}")
         if any(not line.get("LinkedTxn") for line in payment_data["Line"]):

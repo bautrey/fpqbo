@@ -148,6 +148,39 @@ def test_create_payment_requires_customer_amount_and_lines(monkeypatch, missing)
     assert sentinel.calls == 0
 
 
+def test_zero_payment_closing_an_invoice_against_a_journal_entry(monkeypatch):
+    """#81: partner-connect#970 settles a ZRG-collected invoice with a JE plus a
+    $0 payment linking both. TotalAmt 0 is a real amount, not a missing one,
+    and the JournalEntry link must reach QBO as written."""
+    svc, sentinel = _stub(monkeypatch)
+
+    _run(svc.create_payment(1, {
+        "CustomerRef": {"value": "1400"},
+        "TotalAmt": 0,
+        "TxnDate": "2026-11-13",
+        "Line": [
+            {"Amount": 12500.00, "LinkedTxn": [{"TxnId": "97001", "TxnType": "Invoice"}]},
+            {"Amount": 12500.00, "LinkedTxn": [{"TxnId": "8812", "TxnType": "JournalEntry"}]},
+        ],
+    }))
+
+    p = sentinel.captured
+    assert p is not None, "Payment.save() was never called"
+    assert p.TotalAmt == 0
+    assert [(t.TxnId, t.TxnType) for line in p.Line for t in line.LinkedTxn] == [
+        ("97001", "Invoice"),
+        ("8812", "JournalEntry"),
+    ]
+
+
+def test_create_payment_refuses_a_null_total(monkeypatch):
+    svc, sentinel = _stub(monkeypatch)
+
+    with pytest.raises(QboBadPayload, match="TotalAmt"):
+        _run(svc.create_payment(1, {**PAYOUTS_BODY, "TotalAmt": None}))
+    assert sentinel.calls == 0
+
+
 @pytest.mark.parametrize("lines", [
     [],
     [{"Amount": 12500.00}],
