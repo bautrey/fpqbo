@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import verify_api_key
-from app.routers._qbo_write import run_qbo_write
+from app.routers._qbo_write import request_id_header, run_qbo_write
 from app.services.qbo_service import QBOService, get_qbo_service
 from app.utils.paging import (
     MAX_RESULTS_DESCRIPTION,
@@ -64,10 +64,30 @@ async def list_accounts(
     return page.rows
 
 
+@router.get("/lookup", response_model=list[dict[str, Any]])
+async def lookup_accounts(
+    company_id: int = Query(..., description="QBO company ID"),
+    name: str = Query(..., description="Exact account Name"),
+    qbo: QBOService = Depends(_get_service),
+) -> list[dict[str, Any]]:
+    """Find accounts, active and inactive, by exact name.
+
+    Names repeat under different parents, so every match is returned; read
+    FullyQualifiedName and ParentRef to tell them apart.
+    """
+    try:
+        return await qbo.lookup_accounts(company_id, name)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
 @router.post("/", response_model=dict[str, Any], status_code=201)
 async def create_account(
     company_id: int = Query(..., description="QBO company ID"),
     account_data: dict[str, Any] = Body(..., description="Account data"),
+    request_id: str | None = Depends(request_id_header),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
     """Create an account (chart-of-accounts entry) in QBO.
@@ -82,7 +102,38 @@ async def create_account(
     }
     """
     return await run_qbo_write(
-        qbo.create_account(company_id, account_data), entity="account"
+        qbo.create_account(company_id, account_data, request_id=request_id),
+        entity="account",
+    )
+
+
+@router.post("/{account_id}/activate", response_model=dict[str, Any])
+async def activate_account(
+    account_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    request_id: str | None = Depends(request_id_header),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Make an account active. Returns it unchanged if it already is."""
+    return await run_qbo_write(
+        qbo.set_account_active(company_id, account_id, True, request_id=request_id),
+        entity="account",
+        has_body=False,
+    )
+
+
+@router.post("/{account_id}/deactivate", response_model=dict[str, Any])
+async def deactivate_account(
+    account_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    request_id: str | None = Depends(request_id_header),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Make an account inactive. Returns it unchanged if it already is."""
+    return await run_qbo_write(
+        qbo.set_account_active(company_id, account_id, False, request_id=request_id),
+        entity="account",
+        has_body=False,
     )
 
 

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import verify_api_key
-from app.routers._qbo_write import run_qbo_write
+from app.routers._qbo_write import request_id_header, run_qbo_write
 from app.services.qbo_service import QBOService, get_qbo_service
 from app.utils.paging import (
     MAX_RESULTS_DESCRIPTION,
@@ -63,10 +63,40 @@ async def list_vendors(
     return page.rows
 
 
+@router.get("/lookup", response_model=list[dict[str, Any]])
+async def lookup_vendors(
+    company_id: int = Query(..., description="QBO company ID"),
+    display_name: str | None = Query(None, description="Exact DisplayName"),
+    email: str | None = Query(
+        None, description="PrimaryEmailAddr, matched case-insensitively"
+    ),
+    qbo: QBOService = Depends(_get_service),
+) -> list[dict[str, Any]]:
+    """Find vendors, active and inactive, by exact display name and/or email.
+
+    At least one of `display_name` and `email` is required. When both are
+    given a vendor must match both. 503 when the vendor list is too large to
+    search completely, rather than a "no match" that may be wrong.
+    """
+    if display_name is None and email is None:
+        raise HTTPException(
+            status_code=400, detail="Provide display_name, email, or both."
+        )
+    try:
+        return await qbo.lookup_vendors(
+            company_id, display_name=display_name, email=email
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"QBO API error: {e}")
+
+
 @router.post("/", response_model=dict[str, Any], status_code=201)
 async def create_vendor(
     company_id: int = Query(..., description="QBO company ID"),
     vendor_data: dict[str, Any] = Body(..., description="Vendor data"),
+    request_id: str | None = Depends(request_id_header),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
     """Create a vendor in QBO.
@@ -96,7 +126,38 @@ async def create_vendor(
     }
     """
     return await run_qbo_write(
-        qbo.create_vendor(company_id, vendor_data), entity="vendor"
+        qbo.create_vendor(company_id, vendor_data, request_id=request_id),
+        entity="vendor",
+    )
+
+
+@router.post("/{vendor_id}/activate", response_model=dict[str, Any])
+async def activate_vendor(
+    vendor_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    request_id: str | None = Depends(request_id_header),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Make a vendor active. Returns it unchanged if it already is."""
+    return await run_qbo_write(
+        qbo.set_vendor_active(company_id, vendor_id, True, request_id=request_id),
+        entity="vendor",
+        has_body=False,
+    )
+
+
+@router.post("/{vendor_id}/deactivate", response_model=dict[str, Any])
+async def deactivate_vendor(
+    vendor_id: int,
+    company_id: int = Query(..., description="QBO company ID"),
+    request_id: str | None = Depends(request_id_header),
+    qbo: QBOService = Depends(_get_service),
+) -> dict[str, Any]:
+    """Make a vendor inactive. Returns it unchanged if it already is."""
+    return await run_qbo_write(
+        qbo.set_vendor_active(company_id, vendor_id, False, request_id=request_id),
+        entity="vendor",
+        has_body=False,
     )
 
 

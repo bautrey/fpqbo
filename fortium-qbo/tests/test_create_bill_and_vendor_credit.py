@@ -234,7 +234,7 @@ def test_create_vendor_credit_builds_payload_with_all_fields(monkeypatch):
     sentinel = _Sentinel()
     monkeypatch.setattr(
         qbo_service_module.VendorCredit, "save",
-        lambda self, qb=None: sentinel(self),
+        lambda self, qb=None, request_id=None: sentinel(self),
         raising=True,
     )
 
@@ -289,7 +289,7 @@ def test_create_vendor_credit_omits_optional_ap_account(monkeypatch):
     sentinel = _Sentinel()
     monkeypatch.setattr(
         qbo_service_module.VendorCredit, "save",
-        lambda self, qb=None: sentinel(self),
+        lambda self, qb=None, request_id=None: sentinel(self),
         raising=True,
     )
 
@@ -515,7 +515,7 @@ def test_create_vendor_handles_null_refs(monkeypatch):
     sentinel = _Sentinel()
     monkeypatch.setattr(
         qbo_service_module.Vendor, "save",
-        lambda self, qb=None: sentinel(self),
+        lambda self, qb=None, request_id=None: sentinel(self),
         raising=True,
     )
 
@@ -597,7 +597,7 @@ def test_create_vendor_credit_handles_null_refs(monkeypatch):
     sentinel = _Sentinel()
     monkeypatch.setattr(
         qbo_service_module.VendorCredit, "save",
-        lambda self, qb=None: sentinel(self),
+        lambda self, qb=None, request_id=None: sentinel(self),
         raising=True,
     )
 

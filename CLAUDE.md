@@ -52,7 +52,12 @@ Each deployed caller has its own key, so a leak can be revoked without taking th
 | fortiumtax-api (Render `srv-d7ru8hflk1mc73ddeep0`) | env `FPQBO_API_KEY` | `fpqbo-api-key-fortiumtax` | read/write |
 | FortiumHermes (AWS) | SSM `/fortiumhermes/extractors/fpqbo-api-key` | `fpqbo-api-key-hermes` | read-only |
 | PartnerConnect (UAT + prod, one key) | AWS Secrets Manager `partner-connect-uat` / `partner-connect-prod`, key `fpqbo-api-key` | `fpqbo-api-key-partnerconnect` | read-only |
+| PartnerConnect US write (FOR-138) | PartnerConnect's own secret | `fpqbo-api-key-partnerconnect-us` | read/write |
+| PartnerConnect CA write (FOR-971) | PartnerConnect's own secret | `fpqbo-api-key-partnerconnect-ca` | read/write |
+| Talent (FOR-138; talent-api, Render `srv-d5t8cfq4d50c73bvt960`) | env on talent-api | `fpqbo-api-key-talent` | read/write |
 | payouts | its own "Payouts" / "Payouts - Canada" keys | — | read/write |
+
+Each key covers exactly one company: a request whose `company_id` differs from the key's company gets 403.
 
 Before revoking a key, look for its callers in Render env vars, AWS SSM, AWS Secrets Manager, n8n credentials and `~/projects`, not only on this machine. PartnerConnect was missed on 2026-10-09 because nobody searched Secrets Manager.
 
@@ -112,8 +117,14 @@ All `/api/*` endpoints require `X-API-Key` header.
 | GET | `/api/reports/profit-and-loss` | P&L report |
 | GET | `/api/reports/general-ledger` | General Ledger report |
 | POST | `/api/customers/` | Create a customer |
-| POST | `/api/vendors/` | Create a vendor |
-| POST | `/api/accounts/` | Create an account (chart of accounts) |
+| GET | `/api/vendors/lookup` | Find vendors, active and inactive, by exact `display_name` and/or `email` (one required; 503 if the walk is truncated) |
+| GET | `/api/accounts/lookup` | Find accounts, active and inactive, by exact `name`; returns every match, so read `FullyQualifiedName` / `ParentRef` |
+| POST | `/api/vendors/` | Create a vendor (accepts `Request-Id`) |
+| POST | `/api/vendors/{id}/activate` | Set a vendor active (no write if already; accepts `Request-Id`) |
+| POST | `/api/vendors/{id}/deactivate` | Set a vendor inactive (no write if already; accepts `Request-Id`) |
+| POST | `/api/accounts/` | Create an account (chart of accounts) (accepts `Request-Id`) |
+| POST | `/api/accounts/{id}/activate` | Set an account active (no write if already; accepts `Request-Id`) |
+| POST | `/api/accounts/{id}/deactivate` | Set an account inactive (no write if already; accepts `Request-Id`) |
 | POST | `/api/items/` | Create an item (product/service) |
 | POST | `/api/reference/classes` | Create a tracking class; tag lines with it via `ClassRef` (bills, journal entries, vendor credits) |
 | POST | `/api/bills/` | Create a bill |
@@ -122,11 +133,15 @@ All `/api/*` endpoints require `X-API-Key` header.
 | POST | `/api/bill-payments/{id}/void` | Void a bill payment (idempotent; returns `already_voided` if it was) |
 | POST | `/api/payments/` | Record a client payment against invoices (`Line[].LinkedTxn`); deposit account must be Bank or Other Current Asset |
 | POST | `/api/payments/{id}/void` | Void a client payment, reopening its invoices (idempotent; returns `already_voided`) |
-| POST | `/api/vendor-credits/` | Create a vendor credit |
+| POST | `/api/vendor-credits/` | Create a vendor credit (accepts `Request-Id`) |
 | POST | `/api/journal-entries/` | Create a journal entry |
 | POST | `/api/journal-entries/{id}/void` | Void a journal entry |
 | DELETE | `/api/bills/{bill_id}` | Delete a bill |
 | DELETE | `/api/invoices/{invoice_id}` | Delete an invoice |
+
+**`Request-Id`:** the vendor, account and vendor-credit creates and the four activate/deactivate routes take an optional `Request-Id` header (1 to 50 characters of `A-Za-z0-9_-`, else 400 before any QBO call). It goes to QBO as `requestid`, and a repeat of the same id returns the original result instead of creating a second record.
+
+**`active_only=false`** returns inactive rows too (it sends `Active IN (true, false)`; before 2026-11-24 it sent no Active filter and QBO hid inactive rows).
 
 All list endpoints also have `GET /{id}` variants for fetching by ID (except exchange rates, company info, and preferences).
 
