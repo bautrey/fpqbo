@@ -120,7 +120,7 @@ All `/api/*` endpoints require `X-API-Key` header.
 | GET | `/api/vendors/lookup` | Find vendors, active and inactive, by exact `display_name` and/or `email` (one required; 503 if the walk is truncated) |
 | GET | `/api/accounts/lookup` | Find accounts, active and inactive, by exact `name`; returns every match, so read `FullyQualifiedName` / `ParentRef` |
 | POST | `/api/vendors/` | Create a vendor (accepts `Request-Id`) |
-| POST | `/api/vendors/{id}/activate` | Set a vendor active (no write if already; 409 on a SyncToken conflict, 400 when QBO refuses) |
+| POST | `/api/vendors/{id}/activate` | Set a vendor active (no write if already; 409 on a SyncToken conflict, 503 when QBO throttles, 400 when QBO refuses) |
 | POST | `/api/vendors/{id}/deactivate` | Set a vendor inactive (no write if already; 409 / 400 as above) |
 | POST | `/api/accounts/` | Create an account (chart of accounts) (accepts `Request-Id`) |
 | POST | `/api/accounts/{id}/activate` | Set an account active (no write if already; 409 / 400 as above) |

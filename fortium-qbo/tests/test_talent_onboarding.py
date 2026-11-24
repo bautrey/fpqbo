@@ -435,6 +435,23 @@ def test_set_active_maps_quickbooks_refusals(monkeypatch, method, entity, url_ta
 
 
 @pytest.mark.parametrize("method, entity, url_tail", _ACTIVATE)
+def test_set_active_throttle_is_retryable_503_not_400(monkeypatch, method, entity, url_tail):
+    """3001 ThrottleExceeded arrives as a ValidationException but is transient:
+    a 400 would tell the caller not to retry."""
+    from quickbooks.exceptions import ValidationException
+
+    svc, client = _service(monkeypatch)
+    _stub_get(monkeypatch, entity, _record(entity, True))
+
+    def _post(*a, **k):
+        raise ValidationException("Throttle", error_code=3001)
+
+    client.post = _post
+    with pytest.raises(qbo_service_module.QboUnavailable):
+        asyncio.run(getattr(svc, method)(1, 42, False))
+
+
+@pytest.mark.parametrize("method, entity, url_tail", _ACTIVATE)
 def test_set_active_does_not_turn_a_server_fault_into_a_400(monkeypatch, method, entity, url_tail):
     from quickbooks.exceptions import SevereException
 

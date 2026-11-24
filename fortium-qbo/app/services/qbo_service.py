@@ -1410,6 +1410,9 @@ class QBOService:
         except QuickbooksException as e:
             if type(e) not in (QuickbooksException, ValidationException):
                 raise
+            if e.error_code == QBO_THROTTLE_EXCEEDED:
+                # 3001 arrives as a ValidationException but is transient.
+                raise QboUnavailable(f"QBO throttled the update; retry: {e}") from e
             status = 409 if e.error_code == 5010 else 400
             raise HTTPException(status_code=status, detail=f"QBO refused: {e}") from e
         return result.to_dict()
