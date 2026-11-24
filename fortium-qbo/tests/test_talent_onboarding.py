@@ -156,6 +156,37 @@ def test_vendor_lookup_with_neither_param_is_400():
     assert called == []
 
 
+@pytest.mark.parametrize("query", [
+    "email=", "email=%20%20", "display_name=", "display_name=%20",
+    "email=&display_name=", "display_name=%20&email=a%40b.com",
+])
+def test_vendor_lookup_with_a_blank_value_is_400(query):
+    """A blank email would match every vendor that has no email, telling the
+    caller a vendor exists when it does not."""
+    called = []
+
+    async def _lookup(*a, **k):
+        called.append(1)
+        return []
+
+    client = _lookup_client(SimpleNamespace(lookup_vendors=_lookup))
+    assert client.get(f"/api/vendors/lookup?company_id=1&{query}").status_code == 400
+    assert called == []
+
+
+@pytest.mark.parametrize("query", ["name=", "name=%20"])
+def test_account_lookup_with_a_blank_name_is_400(query):
+    called = []
+
+    async def _lookup(*a, **k):
+        called.append(1)
+        return []
+
+    client = _lookup_client(SimpleNamespace(lookup_accounts=_lookup))
+    assert client.get(f"/api/accounts/lookup?company_id=1&{query}").status_code == 400
+    assert called == []
+
+
 def test_lookup_route_is_not_swallowed_by_the_id_route():
     async def _lookup_v(company_id, display_name=None, email=None):
         return [{"Id": "9", "DisplayName": display_name}]
@@ -347,14 +378,16 @@ def test_set_active_sends_sparse_body_and_returns_updated_entity(monkeypatch, me
         return {entity: {"Id": "42", "SyncToken": "4", "Active": target}}
 
     client.post = _post
-    result = asyncio.run(getattr(svc, method)(1, 42, target, request_id="rid-1"))
+    result = asyncio.run(getattr(svc, method)(1, 42, target))
 
     assert len(posts) == 1
     url, body, params, rid = posts[0]
     assert url == f"https://qbo.test/v3/company/r1/{url_tail}"
     assert body == {"Id": "42", "SyncToken": "3", "sparse": True, "Active": target}
     assert params == {"operation": "update"}
-    assert rid == "rid-1"
+    # No requestid: QBO replays the first result for a repeated id, so a
+    # deactivate then activate under one id would silently do nothing.
+    assert rid is None
     assert result["Active"] is target
     assert result["SyncToken"] == "4"
 
@@ -375,6 +408,48 @@ def test_set_active_already_in_state_makes_no_write(monkeypatch, method, entity,
 
 
 @pytest.mark.parametrize("method, entity, url_tail", _ACTIVATE)
+@pytest.mark.parametrize("exc_name, code, status", [
+    # The SDK's own mapping (quickbooks/client.py handle_exceptions): 2000-4999
+    # become ValidationException, 5000-9999 fall through to the bare class.
+    ("QuickbooksException", 5010, 409),   # stale SyncToken
+    ("QuickbooksException", 6240, 400),   # duplicate name on reactivate
+    ("ValidationException", 2050, 400),
+])
+def test_set_active_maps_quickbooks_refusals(monkeypatch, method, entity, url_tail, exc_name, code, status):
+    """A stale SyncToken is a conflict the caller can retry; any other QBO
+    refusal of the update is the caller's 400. Neither is a server failure."""
+    from fastapi import HTTPException
+    from quickbooks import exceptions as qb_exc
+
+    svc, client = _service(monkeypatch)
+    _stub_get(monkeypatch, entity, _record(entity, True))
+
+    def _post(*a, **k):
+        raise getattr(qb_exc, exc_name)("refused", error_code=code, detail="QBO says no")
+
+    client.post = _post
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(getattr(svc, method)(1, 42, False))
+    assert exc.value.status_code == status
+    assert "QBO says no" in exc.value.detail
+
+
+@pytest.mark.parametrize("method, entity, url_tail", _ACTIVATE)
+def test_set_active_does_not_turn_a_server_fault_into_a_400(monkeypatch, method, entity, url_tail):
+    from quickbooks.exceptions import SevereException
+
+    svc, client = _service(monkeypatch)
+    _stub_get(monkeypatch, entity, _record(entity, True))
+
+    def _post(*a, **k):
+        raise SevereException("boom", error_code=10000)
+
+    client.post = _post
+    with pytest.raises(SevereException):
+        asyncio.run(getattr(svc, method)(1, 42, False))
+
+
+@pytest.mark.parametrize("method, entity, url_tail", _ACTIVATE)
 def test_set_active_missing_record_is_404(monkeypatch, method, entity, url_tail):
     svc, client = _service(monkeypatch)
     _stub_get(monkeypatch, entity, None)
@@ -392,30 +467,18 @@ _ACTIVATE_ROUTES = [
 
 
 @pytest.mark.parametrize("path, method, target", _ACTIVATE_ROUTES)
-def test_activate_routes_call_service_with_state_and_request_id(path, method, target):
+def test_activate_routes_call_service_with_state(path, method, target):
     seen = {}
 
-    async def _set(company_id, entity_id, active, request_id=None):
-        seen.update(company_id=company_id, entity_id=entity_id, active=active, request_id=request_id)
+    async def _set(company_id, entity_id, active):
+        seen.update(company_id=company_id, entity_id=entity_id, active=active)
         return {"Id": "7", "Active": active}
 
     client = _write_client(SimpleNamespace(**{method: _set}))
-    resp = client.post(f"{path}?company_id=3", headers={"Request-Id": "r-9"})
+    resp = client.post(f"{path}?company_id=3")
     assert resp.status_code == 200
     assert resp.json() == {"Id": "7", "Active": target}
-    assert seen == {"company_id": 3, "entity_id": 7, "active": target, "request_id": "r-9"}
-
-
-@pytest.mark.parametrize("path, method, target", _ACTIVATE_ROUTES)
-def test_activate_routes_reject_a_bad_request_id(path, method, target):
-    called = []
-
-    async def _set(*a, **k):
-        called.append(1)
-
-    client = _write_client(SimpleNamespace(**{method: _set}))
-    assert client.post(f"{path}?company_id=3", headers={"Request-Id": "bad id"}).status_code == 400
-    assert called == []
+    assert seen == {"company_id": 3, "entity_id": 7, "active": target}
 
 
 @pytest.mark.parametrize("path, method, target", _ACTIVATE_ROUTES)

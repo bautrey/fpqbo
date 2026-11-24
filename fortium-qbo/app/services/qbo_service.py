@@ -65,6 +65,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.qbo_company import QboCompany
+from fastapi import HTTPException
+
 from app.exceptions import QboBadPayload, QboCompanyDisconnected, QboNotFound, QboUnavailable
 from app.utils.paging import QBO_MAX_PAGE_SIZE, PagedResult
 from app.utils.qbo_query import boolean_equals, date_bound, id_in, string_equals
@@ -1364,11 +1366,23 @@ class QBOService:
         company_id: int,
         entity_id: int,
         active: bool,
-        request_id: str | None,
         *,
         label: str,
     ) -> dict[str, Any]:
-        """Sparse-update `Active` on a Vendor or Account, a no-op if already there."""
+        """Sparse-update `Active` on a Vendor or Account, a no-op if already there.
+
+        No requestid: QBO replays the first answer for a repeated id, so a
+        deactivate then activate sent under one id would leave the record
+        inactive behind a 200. The already-in-state check is the idempotency.
+
+        QBO's refusals of the update come back as the caller's error: 5010
+        (stale SyncToken, someone edited the record between read and write) is
+        409, retryable; any other validation refusal, such as 6240 when a
+        reactivated name collides with an active one, is 400. The SDK raises
+        the bare QuickbooksException for 5000-9999 and ValidationException for
+        2000-4999; its other subclasses (auth, severe, not found) are not the
+        caller's fault and propagate.
+        """
         import json as _json
 
         company = self._get_company(company_id)
@@ -1387,28 +1401,28 @@ class QBOService:
                 "sparse": True,
                 "Active": active,
             }
-            response = client.post(
-                url, _json.dumps(payload), params={"operation": "update"}, request_id=request_id
-            )
+            response = client.post(url, _json.dumps(payload), params={"operation": "update"})
             return entity.from_json(response[label])
 
         logger.info(f"Setting {label} {entity_id} Active={active} for company {company.code}")
-        result = await asyncio.to_thread(_update)
+        try:
+            result = await asyncio.to_thread(_update)
+        except QuickbooksException as e:
+            if type(e) not in (QuickbooksException, ValidationException):
+                raise
+            status = 409 if e.error_code == 5010 else 400
+            raise HTTPException(status_code=status, detail=f"QBO refused: {e}") from e
         return result.to_dict()
 
     async def set_vendor_active(
-        self, company_id: int, vendor_id: int, active: bool, request_id: str | None = None
+        self, company_id: int, vendor_id: int, active: bool
     ) -> dict[str, Any]:
-        return await self._set_active(
-            Vendor, company_id, vendor_id, active, request_id, label="Vendor"
-        )
+        return await self._set_active(Vendor, company_id, vendor_id, active, label="Vendor")
 
     async def set_account_active(
-        self, company_id: int, account_id: int, active: bool, request_id: str | None = None
+        self, company_id: int, account_id: int, active: bool
     ) -> dict[str, Any]:
-        return await self._set_active(
-            Account, company_id, account_id, active, request_id, label="Account"
-        )
+        return await self._set_active(Account, company_id, account_id, active, label="Account")
 
     async def get_bills(
         self,

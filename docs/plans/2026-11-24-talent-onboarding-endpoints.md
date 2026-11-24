@@ -31,7 +31,8 @@ Verify after deploy: the same paging count shows inactive > 0 for at least one e
 - `POST /api/vendors/{id}/activate`, `POST /api/vendors/{id}/deactivate`, `POST /api/accounts/{id}/activate`, `POST /api/accounts/{id}/deactivate`.
 - Fetch the record by id (`_fetch_by_id`, 404 when missing), then send a sparse update `{Id, SyncToken, sparse: true, Active: <bool>}` through the same client.post pattern as `update_bill`. Return the updated entity.
 - Idempotent: when the record is already in the requested state, return it unchanged without a write.
-- These accept `Request-Id` too.
+- No `Request-Id` (changed after /code-review high): QBO replays the first answer for a repeated requestid, so a deactivate then activate under one id would silently do nothing. The already-in-state check makes these idempotent without it.
+- QBO refusals: 5010 (stale SyncToken) is 409; any other refusal of the update (e.g. 6240, a reactivated name colliding with an active one) is 400.
 - They're write routes, so a read-only key gets 403 from the existing gate.
 
 ## Docs

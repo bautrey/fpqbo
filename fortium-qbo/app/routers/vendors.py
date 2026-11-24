@@ -82,6 +82,12 @@ async def lookup_vendors(
         raise HTTPException(
             status_code=400, detail="Provide display_name, email, or both."
         )
+    # A blank email would match every vendor that has none, so a blank value
+    # is refused rather than treated as a search.
+    if any(v is not None and not v.strip() for v in (display_name, email)):
+        raise HTTPException(
+            status_code=400, detail="display_name and email cannot be blank."
+        )
     try:
         return await qbo.lookup_vendors(
             company_id, display_name=display_name, email=email
@@ -135,12 +141,15 @@ async def create_vendor(
 async def activate_vendor(
     vendor_id: int,
     company_id: int = Query(..., description="QBO company ID"),
-    request_id: str | None = Depends(request_id_header),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
-    """Make a vendor active. Returns it unchanged if it already is."""
+    """Make a vendor active. Returns it unchanged if it already is.
+
+    409 on a SyncToken conflict (retry), 400 when QuickBooks refuses, for
+    example a DisplayName now taken by an active vendor.
+    """
     return await run_qbo_write(
-        qbo.set_vendor_active(company_id, vendor_id, True, request_id=request_id),
+        qbo.set_vendor_active(company_id, vendor_id, True),
         entity="vendor",
         has_body=False,
     )
@@ -150,12 +159,14 @@ async def activate_vendor(
 async def deactivate_vendor(
     vendor_id: int,
     company_id: int = Query(..., description="QBO company ID"),
-    request_id: str | None = Depends(request_id_header),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
-    """Make a vendor inactive. Returns it unchanged if it already is."""
+    """Make a vendor inactive. Returns it unchanged if it already is.
+
+    409 on a SyncToken conflict (retry), 400 when QuickBooks refuses.
+    """
     return await run_qbo_write(
-        qbo.set_vendor_active(company_id, vendor_id, False, request_id=request_id),
+        qbo.set_vendor_active(company_id, vendor_id, False),
         entity="vendor",
         has_body=False,
     )

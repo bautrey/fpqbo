@@ -120,11 +120,11 @@ All `/api/*` endpoints require `X-API-Key` header.
 | GET | `/api/vendors/lookup` | Find vendors, active and inactive, by exact `display_name` and/or `email` (one required; 503 if the walk is truncated) |
 | GET | `/api/accounts/lookup` | Find accounts, active and inactive, by exact `name`; returns every match, so read `FullyQualifiedName` / `ParentRef` |
 | POST | `/api/vendors/` | Create a vendor (accepts `Request-Id`) |
-| POST | `/api/vendors/{id}/activate` | Set a vendor active (no write if already; accepts `Request-Id`) |
-| POST | `/api/vendors/{id}/deactivate` | Set a vendor inactive (no write if already; accepts `Request-Id`) |
+| POST | `/api/vendors/{id}/activate` | Set a vendor active (no write if already; 409 on a SyncToken conflict, 400 when QBO refuses) |
+| POST | `/api/vendors/{id}/deactivate` | Set a vendor inactive (no write if already; 409 / 400 as above) |
 | POST | `/api/accounts/` | Create an account (chart of accounts) (accepts `Request-Id`) |
-| POST | `/api/accounts/{id}/activate` | Set an account active (no write if already; accepts `Request-Id`) |
-| POST | `/api/accounts/{id}/deactivate` | Set an account inactive (no write if already; accepts `Request-Id`) |
+| POST | `/api/accounts/{id}/activate` | Set an account active (no write if already; 409 / 400 as above) |
+| POST | `/api/accounts/{id}/deactivate` | Set an account inactive (no write if already; 409 / 400 as above) |
 | POST | `/api/items/` | Create an item (product/service) |
 | POST | `/api/reference/classes` | Create a tracking class; tag lines with it via `ClassRef` (bills, journal entries, vendor credits) |
 | POST | `/api/bills/` | Create a bill |
@@ -139,7 +139,7 @@ All `/api/*` endpoints require `X-API-Key` header.
 | DELETE | `/api/bills/{bill_id}` | Delete a bill |
 | DELETE | `/api/invoices/{invoice_id}` | Delete an invoice |
 
-**`Request-Id`:** the vendor, account and vendor-credit creates and the four activate/deactivate routes take an optional `Request-Id` header (1 to 50 characters of `A-Za-z0-9_-`, else 400 before any QBO call). It goes to QBO as `requestid`, and a repeat of the same id returns the original result instead of creating a second record.
+**`Request-Id`:** the vendor, account and vendor-credit creates take an optional `Request-Id` header (1 to 50 characters of `A-Za-z0-9_-`, else 400 before any QBO call). It goes to QBO as `requestid`, and a repeat of the same id returns the original result instead of creating a second record. Use a fresh id per operation. The activate/deactivate routes don't take one: QBO would replay an earlier answer, and they're already idempotent.
 
 **`active_only=false`** returns inactive rows too (it sends `Active IN (true, false)`; before 2026-11-24 it sent no Active filter and QBO hid inactive rows).
 

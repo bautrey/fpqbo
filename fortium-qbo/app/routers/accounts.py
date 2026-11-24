@@ -75,6 +75,8 @@ async def lookup_accounts(
     Names repeat under different parents, so every match is returned; read
     FullyQualifiedName and ParentRef to tell them apart.
     """
+    if not name.strip():
+        raise HTTPException(status_code=400, detail="name cannot be blank.")
     try:
         return await qbo.lookup_accounts(company_id, name)
     except HTTPException:
@@ -111,12 +113,14 @@ async def create_account(
 async def activate_account(
     account_id: int,
     company_id: int = Query(..., description="QBO company ID"),
-    request_id: str | None = Depends(request_id_header),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
-    """Make an account active. Returns it unchanged if it already is."""
+    """Make an account active. Returns it unchanged if it already is.
+
+    409 on a SyncToken conflict (retry), 400 when QuickBooks refuses.
+    """
     return await run_qbo_write(
-        qbo.set_account_active(company_id, account_id, True, request_id=request_id),
+        qbo.set_account_active(company_id, account_id, True),
         entity="account",
         has_body=False,
     )
@@ -126,12 +130,15 @@ async def activate_account(
 async def deactivate_account(
     account_id: int,
     company_id: int = Query(..., description="QBO company ID"),
-    request_id: str | None = Depends(request_id_header),
     qbo: QBOService = Depends(_get_service),
 ) -> dict[str, Any]:
-    """Make an account inactive. Returns it unchanged if it already is."""
+    """Make an account inactive. Returns it unchanged if it already is.
+
+    409 on a SyncToken conflict (retry), 400 when QuickBooks refuses, for
+    example an account QuickBooks will not deactivate.
+    """
     return await run_qbo_write(
-        qbo.set_account_active(company_id, account_id, False, request_id=request_id),
+        qbo.set_account_active(company_id, account_id, False),
         entity="account",
         has_body=False,
     )
