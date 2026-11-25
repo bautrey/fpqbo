@@ -176,6 +176,32 @@ RECONNECT_REQUIRED_STATUSES = frozenset({"disconnected"})
 ACTIVE_ANY_CLAUSE = "Active IN (true, false)"
 
 
+def qbo_refusal(e: QuickbooksException) -> HTTPException | None:
+    """Map a QBO business-rule refusal to the caller's HTTP error, else None.
+
+    The SDK raises the bare QuickbooksException for codes 5000-9999 and
+    ValidationException for 2000-4999. Both are the caller's request being
+    refused, so they are 4xx: 5010 (stale SyncToken) is 409, 3001 (throttle) is
+    503, anything else is 400. The SDK's other subclasses (auth, severe,
+    unsupported, general, not found) are not the caller's fault: None, so the
+    caller keeps its own handling. Exact types, not isinstance, so those
+    subclasses are never swept in.
+    """
+    if type(e) not in (QuickbooksException, ValidationException):
+        return None
+    # Only a Fault QBO actually returned (handle_exceptions, codes 2000-9999)
+    # is a refusal. The SDK also raises the bare class with 10000 for an HTTP
+    # error or unreadable JSON, and with 0 for its own local errors: no Fault
+    # was read, so the write may have booked, and that stays a 500.
+    if not 2000 <= e.error_code <= 9999:
+        return None
+    if e.error_code == QBO_THROTTLE_EXCEEDED:
+        # 3001 arrives as a ValidationException but is transient.
+        return QboUnavailable(f"QBO throttled the request; retry: {e}")
+    status = 409 if e.error_code == 5010 else 400
+    return HTTPException(status_code=status, detail=f"QBO refused: {e}")
+
+
 def _active_clause(active_only: bool) -> str:
     """Build the Active portion of a QBO query.
 
@@ -1235,6 +1261,9 @@ class QBOService:
             if "Active" in vendor_data:
                 vnd.Active = vendor_data["Active"]
 
+            if "Vendor1099" in vendor_data:
+                vnd.Vendor1099 = vendor_data["Vendor1099"]
+
             # Email
             if "PrimaryEmailAddr" in vendor_data:
                 email = EmailAddress()
@@ -1408,13 +1437,10 @@ class QBOService:
         try:
             result = await asyncio.to_thread(_update)
         except QuickbooksException as e:
-            if type(e) not in (QuickbooksException, ValidationException):
+            refusal = qbo_refusal(e)
+            if refusal is None:
                 raise
-            if e.error_code == QBO_THROTTLE_EXCEEDED:
-                # 3001 arrives as a ValidationException but is transient.
-                raise QboUnavailable(f"QBO throttled the update; retry: {e}") from e
-            status = 409 if e.error_code == 5010 else 400
-            raise HTTPException(status_code=status, detail=f"QBO refused: {e}") from e
+            raise refusal from e
         return result.to_dict()
 
     async def set_vendor_active(
@@ -2523,14 +2549,15 @@ class QBOService:
         company_id: int,
         max_results: int = QBO_MAX_PAGE_SIZE,
         offset: int = 0,
+        doc_number: str | None = None,
     ) -> PagedResult:
-        """Get one page of vendor credits."""
+        """Get one page of vendor credits,optionally those with one DocNumber."""
         company = self._get_company(company_id)
         client = self._get_client(company)
         return await self._fetch_page(
             VendorCredit,
             client=client,
-            clause=None,
+            clause=string_equals("DocNumber", doc_number) if doc_number is not None else None,
             offset=offset,
             limit=max_results,
             op="get_vendor_credits",
