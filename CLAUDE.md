@@ -141,7 +141,7 @@ All `/api/*` endpoints require `X-API-Key` header.
 
 **`Request-Id`:** the vendor, account and vendor-credit creates take an optional `Request-Id` header (1 to 50 characters of `A-Za-z0-9_-`, else 400 before any QBO call). It goes to QBO as `requestid`, and a repeat of the same id returns the original result instead of creating a second record. Use a fresh id per operation. The activate/deactivate routes don't take one: QBO would replay an earlier answer, and they're already idempotent.
 
-**Write-route error codes:** when QBO refuses a create/update (duplicate name 6240, validation faults), the route answers 400 with `detail` = `QBO refused: <QBO's own text>`. A stale SyncToken (5010) is 409, a throttle (3001) is 503. Auth, severe, unsupported and not-found faults stay 500 `QBO API error: ...`. Before 2026-11-25 all of these were 500.
+**Write-route error codes:** when QBO refuses a write that goes through `run_qbo_write` (every create, vendor/account activate and deactivate, payment and bill-payment void, vendor-credit delete), the route answers 400 with `detail` = `QBO refused: <QBO's own text>`. A stale SyncToken (5010) is 409, a throttle (3001) is 503. Auth, severe, unsupported and not-found faults stay 500 `QBO API error: ...`. Before 2026-11-25 all of these were 500. Bill update, bill delete, invoice delete and journal-entry void still have their own handlers and answer a refusal with 500 (#86).
 
 **`active_only=false`** returns inactive rows too (it sends `Active IN (true, false)`; before 2026-11-24 it sent no Active filter and QBO hid inactive rows).
 
