@@ -37,6 +37,9 @@ async def list_vendor_credits(
         QBO_MAX_PAGE_SIZE, ge=1, le=QBO_MAX_PAGE_SIZE, description=MAX_RESULTS_DESCRIPTION
     ),
     offset: int = Query(0, ge=0, description=OFFSET_DESCRIPTION),
+    doc_number: str | None = Query(
+        None, description="Only credits with exactly this DocNumber (blank is 400)"
+    ),
     qbo: QBOService = Depends(_get_service),
 ) -> list[dict[str, Any]]:
     """List vendor credits.
@@ -45,11 +48,14 @@ async def list_vendor_credits(
     `offset`, and read `X-Has-More` / `X-Total-Count` to tell a partial
     answer from a whole one.
     """
+    if doc_number is not None and not doc_number.strip():
+        raise HTTPException(status_code=400, detail="doc_number must not be blank")
     try:
         page = await qbo.get_vendor_credits(
             company_id=company_id,
             max_results=max_results,
             offset=offset,
+            doc_number=doc_number,
         )
     except HTTPException:
         raise
@@ -127,10 +133,10 @@ async def delete_vendor_credit(
     payments, bill payments and sales receipts; a vendor credit can only be
     deleted. A credit inside a closed period therefore cannot be neutralised
     through this API at all — QuickBooks refuses, and the refusal text is the
-    answer. It arrives in the 500's `detail`, carrying QuickBooks' own error
+    answer. It arrives in the 400's `detail`, carrying QuickBooks' own error
     code and message, because that is the part worth reading:
 
-        QBO API error: QB Exception 6240: <message>
+        QBO refused: QB Exception 6240: <message>
         <detail>
 
     Note the exact prefix. The SDK maps 2000-4999 to ValidationException and

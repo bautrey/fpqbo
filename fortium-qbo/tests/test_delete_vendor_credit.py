@@ -177,7 +177,7 @@ def test_the_router_renders_that_refusal_into_the_response_body(monkeypatch):
 
     r = client.delete("/vendor-credits/96159", params={"company_id": 1})
 
-    assert r.status_code == 500
+    assert r.status_code == 400
     detail = r.json()["detail"]
     assert "6240" in detail
     assert "closed period" in detail.lower()

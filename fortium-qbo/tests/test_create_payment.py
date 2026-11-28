@@ -287,7 +287,7 @@ def test_post_payments_passes_quickbooks_refusal_text_through():
     finally:
         app.dependency_overrides.clear()
 
-    assert resp.status_code == 500
+    assert resp.status_code == 400
     assert "Invalid account type" in resp.json()["detail"]
     assert "Deposit To account must be Bank or Other Current Asset" in resp.json()["detail"]
 

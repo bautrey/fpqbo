@@ -38,6 +38,10 @@ the HTTP method.
                               its ``value`` key) surfacing while the service
                               builds the QBO object is a *client* error, not a
                               500 "QBO API error".
+- ``QuickbooksException`` / ``ValidationException`` (exact types, see
+  ``qbo_refusal``) → QBO refused the request: 400 ``"QBO refused: <QBO text>"``,
+  409 for 5010 (stale SyncToken), 503 for 3001 (throttle). The SDK's other
+  subclasses (auth, severe, unsupported, general, not found) fall through.
 - any other ``Exception``  → logged at error level (with traceback) THEN 500
                               with the existing ``f"QBO API error: {e}"`` detail.
 
@@ -49,6 +53,9 @@ import re
 from typing import Any, Awaitable
 
 from fastapi import Header, HTTPException
+from quickbooks.exceptions import QuickbooksException
+
+from app.services.qbo_service import qbo_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +109,9 @@ async def run_qbo_write(
             detail=f"Invalid or missing field in {entity} payload: {e}",
         ) from e
     except Exception as e:
+        refusal = qbo_refusal(e) if isinstance(e, QuickbooksException) else None
+        if refusal is not None:
+            raise refusal from e
         logger.error("QBO write failed for %s: %s", entity, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"QBO API error: {e}") from e
 
